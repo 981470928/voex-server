@@ -1,0 +1,32 @@
+{
+  "name": "file-server",
+  "version": "1.0.0",
+  "description": "File upload and document management server",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "pm2 start ecosystem.config.js",
+    "stop": "pm2 stop file-server",
+    "restart": "pm2 restart file-server",
+    "dev": "tsx watch src/index.ts",
+    "logs": "pm2 logs file-server",
+    "status": "pm2 status"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "mime-types": "^2.1.35",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.11.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/mime-types": "^2.1.4",
+    "@types/multer": "^1.4.12",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.5.0",
+    "tsx": "^4.19.0"
+  }
+}
