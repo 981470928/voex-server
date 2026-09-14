@@ -1,180 +1,195 @@
-import { Router, Request, Response } from "express";
-import { v4 as uuidv4 } from "uuid";
-import fs from "fs";
-import path from "path";
-import { getPool } from "../db";
-import { STATIC_DIR } from "../index";
+import { Router } from "express";
+import { creator, currentUser } from "../auth/session";
+import {
+  HttpError,
+  asyncRoute,
+  bodyObject,
+  keyValue,
+  nameValue,
+} from "../http";
+import { resolveProjectPermissions } from "../permissions/project";
+import {
+  DOCUMENT_COLUMNS,
+  DOCUMENT_FROM,
+  documentLocation,
+  findDocument,
+} from "../workspace/service";
+import { publicKey } from "../workspace/store";
+import { workspaceTransaction } from "../workspace/transaction";
+import {
+  documentDto,
+  type DocumentInfo,
+  type DocumentRow,
+} from "../workspace/types";
 
-export const documentRouter = Router();
+export const documentRouter: Router = Router();
 
-/**
- * POST /api/document
- * Body: { file_name?: string }
- * Returns: { file_key: string, file_name: string }
- */
-documentRouter.post("/document", async (req: Request, res: Response) => {
-  try {
-    const pool = getPool();
-    const fileKey = uuidv4().replace(/-/g, "").slice(0, 16);
-    const fileName = req.body.file_name || "untitled.md";
-
-    await pool.execute(
-      "INSERT INTO documents (file_key, file_name) VALUES (?, ?)",
-      [fileKey, fileName],
-    );
-
-    res.json({ file_key: fileKey, file_name: fileName });
-  } catch (err) {
-    console.error("[Create Document Error]", err);
-    res.status(500).json({ error: "Failed to create document" });
-  }
-});
-
-/**
- * DELETE /api/document/:fileKey
- * Deletes document, associated file records, and orphaned physical files
- * Returns: { success: true }
- */
-documentRouter.delete(
-  "/document/:fileKey",
-  async (req: Request, res: Response) => {
-    try {
-      const { fileKey } = req.params;
-      const pool = getPool();
-      const connection = await pool.getConnection();
-
-      try {
-        await connection.beginTransaction();
-
-        // Get all file hashes for this document
-        const [fileRows] = await connection.execute(
-          "SELECT hash FROM files WHERE file_key = ?",
-          [fileKey],
-        );
-        const files = fileRows as { hash: string }[];
-
-        // Delete document
-        await connection.execute("DELETE FROM documents WHERE file_key = ?", [
-          fileKey,
-        ]);
-
-        // Delete file records
-        await connection.execute("DELETE FROM files WHERE file_key = ?", [
-          fileKey,
-        ]);
-
-        await connection.commit();
-
-        // Check each hash: delete physical file only if no other references exist
-        for (const file of files) {
-          const [remaining] = await pool.execute(
-            "SELECT COUNT(*) as count FROM files WHERE hash = ?",
-            [file.hash],
-          );
-          const count = (remaining as any[])[0].count;
-          if (count === 0) {
-            const filePath = path.join(STATIC_DIR, file.hash);
-            if (fs.existsSync(filePath)) {
-              fs.unlinkSync(filePath);
-            }
-          }
-        }
-
-        res.json({ success: true });
-      } catch (err) {
-        await connection.rollback();
-        throw err;
-      } finally {
-        connection.release();
-      }
-    } catch (err) {
-      console.error("[Delete Document Error]", err);
-      res.status(500).json({ error: "Failed to delete document" });
-    }
-  },
+documentRouter.post(
+  "/document",
+  asyncRoute(async (req, res) => {
+    const body = bodyObject(req.body);
+    const fileName =
+      body.file_name === undefined
+        ? "untitled.md"
+        : nameValue(body.file_name, "文档名称");
+    const projectKey =
+      body.project_key === undefined
+        ? undefined
+        : keyValue(body.project_key, "项目标识");
+    const folderKey =
+      body.folder_key === undefined
+        ? undefined
+        : keyValue(body.folder_key, "文件夹标识");
+    const result = await workspaceTransaction(true, async (connection) => {
+      const location = await documentLocation(
+        connection,
+        req,
+        projectKey,
+        folderKey,
+        body.team_key === undefined
+          ? undefined
+          : keyValue(body.team_key, "团队标识"),
+      );
+      const fileKey = publicKey();
+      await connection.execute(
+        "INSERT INTO documents (file_key, file_name, folder_id, creator_id, privileges) VALUES (?, ?, ?, ?, JSON_OBJECT('mode','inherit'))",
+        [fileKey, fileName, location.folder.id, currentUser(req).id],
+      );
+      return {
+        revision: 1,
+        privileges: { mode: "inherit" },
+        creator: creator(currentUser(req)),
+        file_key: fileKey,
+        file_name: fileName,
+        project_key: location.project.project_key,
+        folder_key: location.folder.folder_key,
+        project_name: location.project.name,
+        folder_path: location.folder_path,
+      };
+    });
+    res.json(result);
+  }),
 );
 
-/**
- * PUT /api/document/:fileKey
- * Body: { file_content?: string, file_name?: string }
- * At least one of file_content or file_name is required
- * Returns: { success: true }
- */
+documentRouter.get(
+  "/document/:fileKey",
+  asyncRoute(async (req, res) => {
+    const key = keyValue(req.params.fileKey, "文档标识");
+    const info = await workspaceTransaction(
+      false,
+      async (connection): Promise<DocumentInfo & { permissions: unknown }> => {
+        const row = await findDocument(connection, req, key, "read", true);
+        return {
+          ...documentDto(row),
+          file_content: row.file_content ?? null,
+          permissions: await resolveProjectPermissions(
+            req,
+            { kind: "project", project_key: row.project_key },
+            connection,
+          ),
+        };
+      },
+    );
+    res.json(info);
+  }),
+);
+
 documentRouter.put(
   "/document/:fileKey",
-  async (req: Request, res: Response) => {
-    try {
-      const { fileKey } = req.params;
-      const { file_content, file_name } = req.body;
-
-      if (file_content === undefined && file_name === undefined) {
-        res.status(400).json({
-          error: "At least one of file_content or file_name is required",
-        });
-        return;
-      }
-
-      const pool = getPool();
-
-      // Build dynamic SET clause
-      const sets: string[] = [];
-      const values: any[] = [];
-
-      if (file_content !== undefined) {
-        sets.push("file_content = ?");
-        values.push(file_content);
-      }
-      if (file_name !== undefined) {
-        sets.push("file_name = ?");
-        values.push(file_name);
-      }
-
-      values.push(fileKey);
-
-      const [result] = await pool.execute(
-        `UPDATE documents SET ${sets.join(", ")} WHERE file_key = ?`,
-        values,
-      );
-
-      if ((result as any).affectedRows === 0) {
-        res.status(404).json({ error: "Document not found" });
-        return;
-      }
-
-      res.json({ success: true });
-    } catch (err) {
-      console.error("[Update Document Error]", err);
-      res.status(500).json({ error: "Failed to update document" });
+  asyncRoute(async (req, res) => {
+    const key = keyValue(req.params.fileKey, "文档标识");
+    const body = bodyObject(req.body);
+    const sets: string[] = [];
+    const values: (string | null)[] = [];
+    if (body.file_name !== undefined) {
+      sets.push("file_name = ?");
+      values.push(nameValue(body.file_name, "文档名称"));
     }
-  },
+    if (body.file_content !== undefined) {
+      if (body.file_content !== null && typeof body.file_content !== "string") {
+        throw new HttpError(400, "文档内容必须是字符串或 null");
+      }
+      sets.push("file_content = ?");
+      values.push(body.file_content);
+    }
+    if (sets.length === 0) throw new HttpError(400, "请提供文档名称或文档内容");
+    const revision = await workspaceTransaction(true, async (connection) => {
+      const document = await findDocument(connection, req, key, "write");
+      if (body.file_content !== undefined) {
+        if (!Number.isInteger(body.revision))
+          throw new HttpError(400, "保存正文需要版本号");
+        if (body.revision !== document.revision)
+          throw new HttpError(
+            409,
+            "文件已被其他人修改，请保留本地内容后重新加载",
+          );
+        sets.push("revision = revision + 1");
+      }
+      await connection.execute(
+        `UPDATE documents SET ${sets.join(", ")} WHERE file_key = ?`,
+        [...values, document.file_key],
+      );
+      return (
+        Number(document.revision) + (body.file_content !== undefined ? 1 : 0)
+      );
+    });
+    res.json({ success: true, revision });
+  }),
 );
 
-/**
- * GET /api/documents?code=keyword
- * Without code: returns all documents
- * With code: returns documents matching file_name (LIKE search)
- * Returns: { id, file_key, file_name, file_content, created_at, updated_at }[]
- */
-documentRouter.get("/documents", async (req: Request, res: Response) => {
-  try {
-    const pool = getPool();
-    const code = req.query.code as string | undefined;
+documentRouter.delete(
+  "/document/:fileKey",
+  asyncRoute(async (req, res) => {
+    const key = keyValue(req.params.fileKey, "文档标识");
+    await workspaceTransaction(true, async (connection) => {
+      const document = await findDocument(connection, req, key, "write");
+      await connection.execute("DELETE FROM files WHERE file_key = ?", [
+        document.file_key,
+      ]);
+      await connection.execute("DELETE FROM documents WHERE id = ?", [
+        document.id,
+      ]);
+    });
 
-    let rows;
-    if (code) {
-      [rows] = await pool.execute(
-        "SELECT id, file_key, file_name, file_content, created_at, updated_at FROM documents WHERE file_name LIKE ?",
-        [`%${code}%`],
-      );
-    } else {
-      [rows] = await pool.execute(
-        "SELECT id, file_key, file_name, file_content, created_at, updated_at FROM documents",
-      );
+    // Shared content hashes remain on disk until a separate orphan sweep.
+    res.json({ success: true });
+  }),
+);
+
+/** 当前用户的文档元数据列表，不包含正文。 */
+documentRouter.get(
+  "/documents",
+  asyncRoute(async (req, res) => {
+    const code = req.query.code;
+    if (code !== undefined && typeof code !== "string") {
+      throw new HttpError(400, "搜索关键字必须是字符串");
     }
-
-    res.json(rows);
-  } catch (err) {
-    console.error("[Query Documents Error]", err);
-    res.status(500).json({ error: "Failed to query documents" });
-  }
-});
+    const result = await workspaceTransaction(false, async (connection) => {
+      const [documents] = await connection.execute<DocumentRow[]>(
+        `SELECT ${DOCUMENT_COLUMNS} ${DOCUMENT_FROM}
+       WHERE EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id=p.team_id AND tm.user_id=?) ${code ? "AND d.file_name LIKE ?" : ""}
+       ORDER BY d.created_at ASC, d.id ASC`,
+        code ? [currentUser(req).id, `%${code}%`] : [currentUser(req).id],
+      );
+      const readable = new Map<string, boolean>();
+      const visible = [];
+      for (const document of documents) {
+        if (!readable.has(document.project_key)) {
+          const permissions = await resolveProjectPermissions(
+            req,
+            {
+              kind: "project",
+              project_key: document.project_key,
+            },
+            connection,
+          );
+          readable.set(document.project_key, permissions.read);
+        }
+        if (readable.get(document.project_key))
+          visible.push(documentDto(document));
+      }
+      return visible;
+    });
+    res.json(result);
+  }),
+);

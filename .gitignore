@@ -3,3 +3,8 @@ logs/
 dist/
 .env
 *.log
+.secrets/
+.auth-backup-path
+releases/auth-before-*/
+.team-backup-path
+releases/team-before-*/

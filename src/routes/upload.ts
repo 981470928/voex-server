@@ -1,253 +1,165 @@
-import { Router, Request, Response } from "express";
+import { Router } from "express";
+import type { Request } from "express";
+import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import multer from "multer";
-import crypto from "crypto";
-import fs from "fs";
-import path from "path";
-import mime from "mime-types";
-import { getPool } from "../db";
-import { STATIC_DIR } from "../index";
+import fs from "node:fs";
+import path from "node:path";
+import { asyncRoute, HttpError, keyValue } from "../http";
+import { creator, currentUser } from "../auth/session";
+import { findDocument } from "../workspace/service";
+import { workspaceTransaction } from "../workspace/transaction";
+import { computeFileHash, removeTemp, STATIC_DIR, TEMP_DIR } from "../storage";
 
 export const uploadRouter = Router();
-
-// Multer: save to temp directory, limit 200MB
 const upload = multer({
-  dest: "/tmp/uploads/",
-  limits: { fileSize: 200 * 1024 * 1024 },
+  dest: TEMP_DIR,
+  limits: {
+    fileSize: 200 * 1024 * 1024,
+    files: 1,
+    fields: 3,
+    parts: 5,
+    fieldSize: 4096,
+  },
 });
-
-// In-memory upload progress tracking (for potential future chunked upload)
-const uploadProgress = new Map<
-  string,
-  {
-    uploadId: string;
-    status: "UPLOADING" | "COMPLETED" | "FAILED";
-    totalBytes: number;
-    persistedBytes: number;
-    uploadedPercent: number;
-  }
->();
-
-/** Compute SHA-256 hash of a file */
-function computeFileHash(filePath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash("sha256");
-    const stream = fs.createReadStream(filePath);
-    stream.on("data", (data) => hash.update(data));
-    stream.on("end", () => resolve(hash.digest("hex")));
-    stream.on("error", reject);
-  });
+function hashValue(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))
+    throw new HttpError(400, "附件标识不合法");
+  return value;
 }
-
-/**
- * POST /api/upload
- * FormData: fileKey (string), file (File), file_name? (string), mime? (string)
- * Returns: { hash: string }
- */
+async function attachment(connection: PoolConnection, req: Request) {
+  const fileKey = keyValue(req.params.fileKey, "文档标识");
+  const hash = hashValue(req.params.hash);
+  await findDocument(
+    connection,
+    req,
+    fileKey,
+    req.method === "GET" ? "read" : "write",
+  );
+  const [rows] = await connection.execute<RowDataPacket[]>(
+    "SELECT id, hash, name, mime, size FROM files WHERE file_key = ? AND hash = ?",
+    [fileKey, hash],
+  );
+  if (!rows[0]) throw new HttpError(404, "附件不存在");
+  return { fileKey, hash, file: rows[0] };
+}
 uploadRouter.post(
   "/upload",
   upload.single("file"),
-  async (req: Request, res: Response) => {
+  asyncRoute(async (req, res) => {
+    const user = currentUser(req);
+    const file = req.file;
     try {
-      const fileKey = req.body.fileKey as string;
-      const file = req.file;
-
-      if (!fileKey || !file) {
-        res.status(400).json({ error: "fileKey and file are required" });
-        return;
-      }
-
-      const pool = getPool();
-
-      // Verify document exists
-      const [docs] = await pool.execute(
-        "SELECT id FROM documents WHERE file_key = ?",
+      if (!file) throw new HttpError(400, "请选择文件");
+      const fileKey = keyValue(req.body.fileKey, "文档标识");
+      // Verify ownership before hashing or storing the uploaded body.
+      await workspaceTransaction(false, (connection) =>
+        findDocument(connection, req, fileKey, "write"),
+      );
+      const hash = await computeFileHash(file.path);
+      const rawName = req.body.file_name ?? file.originalname;
+      const rawMime =
+        req.body.mime ?? file.mimetype ?? "application/octet-stream";
+      if (
+        typeof rawName !== "string" ||
+        !rawName ||
+        Array.from(rawName).length > 255 ||
+        typeof rawMime !== "string" ||
+        !/^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+$/.test(rawMime) ||
+        rawMime.length > 128
+      )
+        throw new HttpError(400, "文件名或文件类型不合法");
+      await workspaceTransaction(true, async (connection) => {
+        await findDocument(connection, req, fileKey, "write");
+        const finalPath = path.join(STATIC_DIR, hash);
+        try {
+          await fs.promises.copyFile(
+            file.path,
+            finalPath,
+            fs.constants.COPYFILE_EXCL,
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+        await connection.execute(
+          "INSERT INTO files (file_key, hash, name, mime, size, creator_id, privileges) VALUES (?, ?, ?, ?, ?, ?, JSON_OBJECT('mode','inherit'))",
+          [fileKey, hash, rawName, rawMime, file.size, user.id],
+        );
+      });
+      res.json({ hash, creator: creator(user) });
+    } finally {
+      await removeTemp(file?.path);
+    }
+  }),
+);
+uploadRouter.get(
+  "/files/:fileKey",
+  asyncRoute(async (req, res) => {
+    const user = currentUser(req);
+    const rows = await workspaceTransaction(false, async (connection) => {
+      const fileKey = keyValue(req.params.fileKey, "文档标识");
+      await findDocument(connection, req, fileKey, "read");
+      const [files] = await connection.execute<RowDataPacket[]>(
+        "SELECT f.hash,f.name,f.mime,f.creator_id,u.name AS creator_name,u.avator AS creator_avator FROM files f LEFT JOIN users u ON u.id=f.creator_id WHERE f.file_key = ?",
         [fileKey],
       );
-      if ((docs as any[]).length === 0) {
-        fs.unlinkSync(file.path);
-        res.status(404).json({ error: "Document not found" });
-        return;
-      }
-
-      // Compute hash
-      const hash = await computeFileHash(file.path);
-      const staticPath = path.join(STATIC_DIR, hash);
-
-      // Deduplication: only save if not already on disk
-      if (!fs.existsSync(staticPath)) {
-        fs.renameSync(file.path, staticPath);
-      } else {
-        fs.unlinkSync(file.path);
-      }
-
-      const mimeType =
-        (req.body.mime as string) ||
-        file.mimetype ||
-        mime.lookup(file.originalname) ||
-        "application/octet-stream";
-      const fileName = (req.body.file_name as string) || file.originalname;
-
-      // Track progress as completed
-      const progressKey = `${fileKey}:${hash}`;
-      const uploadId = `upl_${Date.now()}`;
-      uploadProgress.set(progressKey, {
-        uploadId,
-        status: "COMPLETED",
-        totalBytes: file.size,
-        persistedBytes: file.size,
-        uploadedPercent: 100,
-      });
-
-      // Insert file record
-      await pool.execute(
-        "INSERT INTO files (file_key, hash, name, mime, size) VALUES (?, ?, ?, ?, ?)",
-        [fileKey, hash, fileName, mimeType, file.size],
-      );
-
-      res.json({ hash });
-    } catch (err) {
-      console.error("[Upload Error]", err);
-      res.status(500).json({ error: "Upload failed" });
-    }
-  },
-);
-
-/**
- * GET /api/files/:fileKey
- * Returns: { hash, name, mime }[]
- */
-uploadRouter.get("/files/:fileKey", async (req: Request, res: Response) => {
-  try {
-    const { fileKey } = req.params;
-    const pool = getPool();
-
-    const [rows] = await pool.execute(
-      "SELECT hash, name, mime FROM files WHERE file_key = ?",
-      [fileKey],
-    );
-
+      return files.map((file) => ({
+        hash: file.hash,
+        name: file.name,
+        mime: file.mime,
+        privileges: { mode: "inherit" },
+        creator: {
+          id: file.creator_id,
+          name: file.creator_name,
+          avator: file.creator_avator,
+        },
+      }));
+    });
     res.json(rows);
-  } catch (err) {
-    console.error("[List Files Error]", err);
-    res.status(500).json({ error: "Failed to list files" });
-  }
-});
-
-/**
- * GET /api/download/:fileKey/:hash
- * Returns: blob (file stream)
- */
+  }),
+);
 uploadRouter.get(
   "/download/:fileKey/:hash",
-  async (req: Request, res: Response) => {
-    try {
-      const { fileKey, hash } = req.params;
-      const pool = getPool();
-
-      const [rows] = await pool.execute(
-        "SELECT name, mime FROM files WHERE file_key = ? AND hash = ?",
-        [fileKey, hash],
-      );
-
-      const fileRecord = (rows as any[])[0];
-      if (!fileRecord) {
-        res.status(404).json({ error: "File not found" });
-        return;
-      }
-
-      const filePath = path.join(STATIC_DIR, hash);
-      if (!fs.existsSync(filePath)) {
-        res.status(404).json({ error: "Physical file not found" });
-        return;
-      }
-
-      res.setHeader("Content-Type", fileRecord.mime);
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${encodeURIComponent(fileRecord.name)}"`,
-      );
-
-      const stream = fs.createReadStream(filePath);
-      stream.pipe(res);
-    } catch (err) {
-      console.error("[Download Error]", err);
-      res.status(500).json({ error: "Download failed" });
-    }
-  },
+  asyncRoute(async (req, res) => {
+    const { hash, file } = await workspaceTransaction(false, (connection) =>
+      attachment(connection, req),
+    );
+    const filePath = path.join(STATIC_DIR, hash);
+    const info = await fs.promises.lstat(filePath).catch(() => undefined);
+    if (!info?.isFile() || info.isSymbolicLink())
+      throw new HttpError(404, "附件文件不存在");
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    res.setHeader("Cache-Control", "private, no-store");
+    res.download(filePath, file.name);
+  }),
 );
-
-/**
- * GET /api/upload-progress/:fileKey/:hash
- * Returns: upload progress object
- */
 uploadRouter.get(
   "/upload-progress/:fileKey/:hash",
-  async (req: Request, res: Response) => {
-    try {
-      const { fileKey, hash } = req.params;
-      const progressKey = `${fileKey}:${hash}`;
-
-      const progress = uploadProgress.get(progressKey);
-      if (!progress) {
-        res.status(404).json({ error: "Upload record not found" });
-        return;
-      }
-
-      res.json(progress);
-    } catch (err) {
-      console.error("[Progress Error]", err);
-      res.status(500).json({ error: "Failed to get progress" });
-    }
-  },
+  asyncRoute(async (req, res) => {
+    const { hash, file } = await workspaceTransaction(false, (connection) =>
+      attachment(connection, req),
+    );
+    res.json({
+      uploadId: hash,
+      status: "COMPLETED",
+      totalBytes: Number(file.size),
+      persistedBytes: Number(file.size),
+      uploadedPercent: 100,
+    });
+  }),
 );
-
-/**
- * DELETE /api/attachment/:fileKey/:hash
- * Deletes an attachment record and its physical file if no other references exist
- * Returns: { success: true }
- */
 uploadRouter.delete(
   "/attachment/:fileKey/:hash",
-  async (req: Request, res: Response) => {
-    try {
-      const { fileKey, hash } = req.params;
-      const pool = getPool();
-
-      // Check if the file record exists
-      const [rows] = await pool.execute(
-        "SELECT id FROM files WHERE file_key = ? AND hash = ?",
+  asyncRoute(async (req, res) => {
+    await workspaceTransaction(true, async (connection) => {
+      const { fileKey, hash } = await attachment(connection, req);
+      await connection.execute(
+        "DELETE FROM files WHERE file_key = ? AND hash = ?",
         [fileKey, hash],
       );
-      if ((rows as any[]).length === 0) {
-        res.status(404).json({ error: "Attachment not found" });
-        return;
-      }
-
-      // Delete the file record
-      await pool.execute("DELETE FROM files WHERE file_key = ? AND hash = ?", [
-        fileKey,
-        hash,
-      ]);
-
-      // Check if this hash is still referenced by other records
-      const [remaining] = await pool.execute(
-        "SELECT COUNT(*) as count FROM files WHERE hash = ?",
-        [hash],
-      );
-      const count = (remaining as any[])[0].count;
-
-      // If no other references, delete the physical file
-      if (count === 0) {
-        const filePath = path.join(STATIC_DIR, hash);
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-      }
-
-      res.json({ success: true });
-    } catch (err) {
-      console.error("[Delete Attachment Error]", err);
-      res.status(500).json({ error: "Failed to delete attachment" });
-    }
-  },
+      // A concurrent upload can reuse a content hash; physical cleanup is left to a separate orphan sweep.
+    });
+    res.json({ success: true });
+  }),
 );

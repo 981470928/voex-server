@@ -1,7 +1,4 @@
 import mysql from "mysql2/promise";
-import { migrateTeams } from "./migrations/003-teams";
-import { migrateAuth } from "./migrations/002-auth";
-import { migrateWorkspace } from "./migrations/001-workspace";
 
 const DB_CONFIG = {
   host: "127.0.0.1",
@@ -56,10 +53,6 @@ export async function initDatabase(): Promise<mysql.Pool> {
       INDEX idx_hash (hash)
     )
   `);
-
-  await migrateWorkspace(pool);
-  await migrateAuth(pool);
-  await migrateTeams(pool);
 
   console.log("[DB] Database and tables initialized");
   return pool;
