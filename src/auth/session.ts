@@ -32,7 +32,7 @@ declare global {
   }
 }
 export const ACCESS_SECONDS = 900;
-const REFRESH_SECONDS = 7 * 24 * 60 * 60;
+const REFRESH_SECONDS = 14 * 24 * 60 * 60;
 const issuer = "voex";
 const audience = "voex-web";
 mkdirSync("/home/server/.secrets", { recursive: true, mode: 0o700 });
@@ -121,7 +121,7 @@ export async function createSession(
     "DELETE FROM auth_sessions WHERE expires_at <= UTC_TIMESTAMP()",
   );
   await database.execute(
-    "INSERT INTO auth_sessions (id, user_id, refresh_hash, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 7 DAY))",
+    "INSERT INTO auth_sessions (id, user_id, refresh_hash, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 14 DAY))",
     [sessionId, user.id, digest(refreshToken)],
   );
   res.cookie("voex_refresh", refreshToken, {

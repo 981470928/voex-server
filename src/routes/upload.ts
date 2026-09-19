@@ -2,13 +2,11 @@ import { Router } from "express";
 import type { Request } from "express";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import multer from "multer";
-import fs from "node:fs";
-import path from "node:path";
 import { asyncRoute, HttpError, keyValue } from "../http";
 import { creator, currentUser } from "../auth/session";
 import { findDocument } from "../workspace/service";
 import { workspaceTransaction } from "../workspace/transaction";
-import { computeFileHash, removeTemp, STATIC_DIR, TEMP_DIR } from "../storage";
+import { removeTemp, storeFile, streamStoredFile, TEMP_DIR } from "../storage";
 
 export const uploadRouter = Router();
 const upload = multer({
@@ -51,11 +49,10 @@ uploadRouter.post(
     try {
       if (!file) throw new HttpError(400, "请选择文件");
       const fileKey = keyValue(req.body.fileKey, "文档标识");
-      // Verify ownership before hashing or storing the uploaded body.
+      // Verify ownership before storing the uploaded body.
       await workspaceTransaction(false, (connection) =>
         findDocument(connection, req, fileKey, "write"),
       );
-      const hash = await computeFileHash(file.path);
       const rawName = req.body.file_name ?? file.originalname;
       const rawMime =
         req.body.mime ?? file.mimetype ?? "application/octet-stream";
@@ -68,18 +65,9 @@ uploadRouter.post(
         rawMime.length > 128
       )
         throw new HttpError(400, "文件名或文件类型不合法");
+      const hash = await storeFile(file.path);
       await workspaceTransaction(true, async (connection) => {
         await findDocument(connection, req, fileKey, "write");
-        const finalPath = path.join(STATIC_DIR, hash);
-        try {
-          await fs.promises.copyFile(
-            file.path,
-            finalPath,
-            fs.constants.COPYFILE_EXCL,
-          );
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        }
         await connection.execute(
           "INSERT INTO files (file_key, hash, name, mime, size, creator_id, privileges) VALUES (?, ?, ?, ?, ?, ?, JSON_OBJECT('mode','inherit'))",
           [fileKey, hash, rawName, rawMime, file.size, user.id],
@@ -123,15 +111,12 @@ uploadRouter.get(
     const { hash, file } = await workspaceTransaction(false, (connection) =>
       attachment(connection, req),
     );
-    const filePath = path.join(STATIC_DIR, hash);
-    const info = await fs.promises.lstat(filePath).catch(() => undefined);
-    if (!info?.isFile() || info.isSymbolicLink())
-      throw new HttpError(404, "附件文件不存在");
+    res.attachment(file.name);
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
     res.setHeader("Cache-Control", "private, no-store");
-    res.download(filePath, file.name);
+    await streamStoredFile(hash, req, res);
   }),
 );
 uploadRouter.get(

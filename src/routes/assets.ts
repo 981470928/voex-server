@@ -11,7 +11,8 @@ import { creator, currentUser } from "../auth/session";
 import {
   removeTemp,
   safeDirectory,
-  storageDirectory,
+  storeFile,
+  streamStoredFile,
   TEMP_DIR,
 } from "../storage";
 
@@ -33,14 +34,11 @@ assetsRouter.post(
   asyncRoute(async (req, res) => {
     const user = currentUser(req);
     const file = req.file;
-    let finalPath: string | undefined;
-    let committed = false;
+    let processedPath: string | undefined;
     try {
       if (!file || !file.size) throw new HttpError(400, "请选择非空文件");
       const directory = safeDirectory(req.body?.path);
-      const destination = storageDirectory(directory);
       const id = randomUUID();
-      let filename = id;
       let mime = "application/octet-stream";
       let size = file.size;
       if (directory === "avator" || directory === "thumbnail") {
@@ -59,8 +57,7 @@ assetsRouter.post(
             (metadata.pages ?? 1) > 1
           )
             throw new Error();
-          filename += ".webp";
-          finalPath = path.join(destination, filename);
+          processedPath = path.join(TEMP_DIR, id + ".webp");
           await sharp(file.path, options)
             .rotate()
             .resize({
@@ -70,25 +67,22 @@ assetsRouter.post(
               withoutEnlargement: true,
             })
             .webp({ quality: 85 })
-            .toFile(finalPath);
+            .toFile(processedPath);
           mime = "image/webp";
-          size = (await fs.stat(finalPath)).size;
+          size = (await fs.stat(processedPath)).size;
         } catch {
           throw new HttpError(
             400,
             "请选择有效的静态 PNG、JPEG 或 WebP 图片（最多 2000 万像素）",
           );
         }
-      } else {
-        finalPath = path.join(destination, filename);
-        await fs.copyFile(file.path, finalPath, fs.constants.COPYFILE_EXCL);
       }
+      const hash = await storeFile(processedPath ?? file.path);
       const name = Array.from(file.originalname).slice(0, 255).join("");
       await getPool().execute(
         "INSERT INTO assets (id, creator_id, directory, storage_name, name, mime, size) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [id, user.id, directory, filename, name, mime, size],
+        [id, user.id, directory, hash, name, mime, size],
       );
-      committed = true;
       res
         .status(201)
         .json({
@@ -102,7 +96,7 @@ assetsRouter.post(
         });
     } finally {
       await removeTemp(file?.path);
-      if (!committed) await removeTemp(finalPath);
+      await removeTemp(processedPath);
     }
   }),
 );
@@ -116,14 +110,7 @@ assetsRouter.get(
     );
     if (!rows[0]) throw new HttpError(404, "文件不存在");
     const row = rows[0];
-    if (!/^[a-f0-9-]{36}(\.webp)?$/.test(row.storage_name))
-      throw new HttpError(404, "文件不存在");
-    const filePath = path.join(
-      storageDirectory(row.directory),
-      row.storage_name,
-    );
-    const info = await fs.lstat(filePath).catch(() => undefined);
-    if (!info?.isFile() || info.isSymbolicLink())
+    if (!/^[a-f0-9]{64}$/.test(row.storage_name))
       throw new HttpError(404, "文件不存在");
     res.setHeader("Content-Type", row.mime);
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -134,6 +121,6 @@ assetsRouter.get(
       "Content-Disposition",
       `${row.mime === "image/webp" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(row.name).replace(/'/g, "%27")}`,
     );
-    res.sendFile(filePath);
+    await streamStoredFile(row.storage_name, req, res);
   }),
 );

@@ -2,8 +2,6 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { randomBytes, randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { rateLimit } from "express-rate-limit";
 import { asyncRoute, bodyObject, HttpError, keyValue } from "../http";
 import { currentUser, digest, optionalAuth } from "../auth/session";
@@ -15,7 +13,7 @@ import {
 } from "../workspace/service";
 import { resolveProjectPermissions } from "../permissions/project";
 import { documentDto, type DocumentRow } from "../workspace/types";
-import { STATIC_DIR, storageDirectory } from "../storage";
+import { streamStoredFile } from "../storage";
 
 export const sharesRouter = Router();
 export const publicSharesRouter = Router();
@@ -226,15 +224,13 @@ publicSharesRouter.put(
   }),
 );
 async function sendAsset(
+  req: Request,
   res: Response,
-  filePath: string,
+  hash: string,
   name: string,
   mime: string,
   inline = false,
 ) {
-  const stat = await fs.lstat(filePath).catch(() => undefined);
-  if (!stat?.isFile() || stat.isSymbolicLink())
-    throw new HttpError(404, "文件不存在");
   res.setHeader("Content-Type", inline ? mime : "application/octet-stream");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
@@ -243,7 +239,7 @@ async function sendAsset(
     "Content-Disposition",
     `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(name).replace(/'/g, "%27")}`,
   );
-  res.sendFile(filePath);
+  await streamStoredFile(hash, req, res);
 }
 publicSharesRouter.get(
   "/shared-file/attachments/:hash",
@@ -259,7 +255,7 @@ publicSharesRouter.get(
       if (!rows[0]) throw new HttpError(404, "附件不存在");
       return rows[0];
     });
-    await sendAsset(res, path.join(STATIC_DIR, hash), file.name, file.mime);
+    await sendAsset(req, res, hash, file.name, file.mime);
   }),
 );
 publicSharesRouter.get(
@@ -278,11 +274,12 @@ publicSharesRouter.get(
       if (!rows[0]) throw new HttpError(404, "没有头像");
       return rows[0];
     });
-    if (!/^[a-f0-9-]{36}\.webp$/.test(asset.storage_name))
+    if (!/^[a-f0-9]{64}$/.test(asset.storage_name))
       throw new HttpError(404, "没有头像");
     await sendAsset(
+      req,
       res,
-      path.join(storageDirectory("avator"), asset.storage_name),
+      asset.storage_name,
       "avator.webp",
       "image/webp",
       true,

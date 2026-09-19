@@ -114,22 +114,29 @@ export async function migrateTeams(pool: Pool): Promise<void> {
     await c.beginTransaction();
     await c.query("SELECT id FROM workspace_state WHERE id=1 FOR UPDATE");
     const [users] = await c.query<RowDataPacket[]>("SELECT id,name FROM users");
-    for (const user of users) {
-      const teamId = await ensurePersonalTeam(c, user.id, user.name);
-      await c.execute(
-        "UPDATE projects SET team_id=?, updated_at=updated_at WHERE creator_id=? AND team_id IS NULL",
-        [teamId, user.id],
+    if (users.length) {
+      for (const user of users) {
+        const teamId = await ensurePersonalTeam(c, user.id, user.name);
+        await c.execute(
+          "UPDATE projects SET team_id=?, updated_at=updated_at WHERE creator_id=? AND team_id IS NULL",
+          [teamId, user.id],
+        );
+      }
+      const [unassigned] = await c.query<RowDataPacket[]>(
+        "SELECT id FROM projects WHERE team_id IS NULL LIMIT 1",
       );
+      if (unassigned.length)
+        throw new Error(
+          "Projects without creator require an explicit team assignment",
+        );
+      await c.commit();
+      await c.query("ALTER TABLE projects MODIFY COLUMN team_id INT NOT NULL");
+    } else {
+      await c.query("DELETE FROM documents WHERE folder_id IN (SELECT id FROM folders)");
+      await c.query("DELETE FROM folders");
+      await c.query("DELETE FROM projects");
+      await c.commit();
     }
-    const [unassigned] = await c.query<RowDataPacket[]>(
-      "SELECT id FROM projects WHERE team_id IS NULL LIMIT 1",
-    );
-    if (unassigned.length)
-      throw new Error(
-        "Projects without creator require an explicit team assignment",
-      );
-    await c.commit();
-    await c.query("ALTER TABLE projects MODIFY COLUMN team_id INT NOT NULL");
     const [constraints] = await c.query<RowDataPacket[]>(
       "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='folders' AND CONSTRAINT_NAME='chk_folders_flat'",
     );
