@@ -1,67 +1,34 @@
-数据库： 127.0.0.1:3306
-账号： root
-密码： chenruiok9814
-库名： file_server
+# 数据库
 
----
+Go 服务通过 `database/sql` 和 `github.com/go-sql-driver/mysql` 访问 MySQL 8。连接参数来自 `.env` 或进程环境：`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE`，示例见 `.env.example`。
 
-## 数据库设计
+完整、可执行的结构以 `schema.sql` 为准，通过 `go:embed` 编入服务。不要在文档内保存真实密码。
 
-### 表 1: `documents` — 文档表
+## 初始化
 
-```sql
-CREATE TABLE IF NOT EXISTS documents (
-  id          INT AUTO_INCREMENT PRIMARY KEY,
-  file_key    VARCHAR(64)  NOT NULL UNIQUE,
-  file_name   VARCHAR(255) NOT NULL DEFAULT 'untitled.md',
-  file_content LONGTEXT,
-  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_file_key (file_key)
-);
-```
+`db.go` 在数据库不存在时创建数据库；空库按嵌入 schema 初始化。已有库验证 `001-workspace`、`002-auth`、`003-teams` 标记及必需字段，不改写现有业务数据。旧库迁移未完成时启动失败，需要先完成迁移。
 
-| 字段           | 类型                                | 说明                 |
-| -------------- | ----------------------------------- | -------------------- |
-| `id`           | INT, PK, AUTO_INCREMENT             | 主键                 |
-| `file_key`     | VARCHAR(64), UNIQUE, INDEX          | 文档唯一标识         |
-| `file_name`    | VARCHAR(255), DEFAULT 'untitled.md' | 文档名称             |
-| `file_content` | LONGTEXT, NULLABLE                  | 文档内容（Markdown） |
-| `created_at`   | DATETIME                            | 创建时间             |
-| `updated_at`   | DATETIME                            | 更新时间             |
+首次初始化需要建库建表权限。已有数据库日常运行使用具有相应业务表读写权限的账号即可。连接池最大 10 个连接，事务使用 REPEATABLE READ。
 
-### 表 2: `files` — 文件资源关联表
+## 表与关系
 
-```sql
-CREATE TABLE IF NOT EXISTS files (
-  id         INT AUTO_INCREMENT PRIMARY KEY,
-  file_key   VARCHAR(64)  NOT NULL,
-  hash       VARCHAR(128) NOT NULL,
-  name       VARCHAR(255) NOT NULL,
-  mime       VARCHAR(128) NOT NULL,
-  size       BIGINT       NOT NULL DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_file_key (file_key),
-  INDEX idx_hash (hash)
-);
-```
+| 表 | 用途 |
+| --- | --- |
+| `users`、`auth_sessions` | 账号、Argon2id 密码哈希、可撤销登录会话 |
+| `teams`、`team_members` | 团队、个人团队、成员角色 |
+| `team_invites`、`team_join_requests` | 邀请令牌哈希与入队审批 |
+| `projects`、`project_members` | 团队项目、继承或指定成员权限 |
+| `folders` | 项目下的单层文件夹 |
+| `documents` | Markdown 正文、作者、目录归属和 revision |
+| `files` | 文档附件名称、类型、大小和内容哈希 |
+| `assets` | UUID 资产、上传目录、作者和图片元数据 |
+| `file_shares` | 文档分享令牌哈希、权限和撤销时间 |
+| `workspace_state`、`schema_migrations` | 工作区写锁和 schema 版本记录 |
 
-| 字段         | 类型                    | 说明                    |
-| ------------ | ----------------------- | ----------------------- |
-| `id`         | INT, PK, AUTO_INCREMENT | 主键                    |
-| `file_key`   | VARCHAR(64), INDEX      | 关联文档的 file_key     |
-| `hash`       | VARCHAR(128), INDEX     | 文件内容 SHA-256 哈希值 |
-| `name`       | VARCHAR(255)            | 原始文件名              |
-| `mime`       | VARCHAR(128)            | MIME 类型               |
-| `size`       | BIGINT                  | 文件大小（字节）        |
-| `created_at` | DATETIME                | 上传时间                |
+结构写入在事务内先锁定 `workspace_state.id=1`，再验证权限并修改数据。文档正文写入检查 revision，冲突返回 HTTP 409。
 
----
+## 文件存储
 
-## 文件去重策略
+附件内容保存于 `VOEX_STATIC_DIR/{sha256}`，默认 `/home/static`；相同内容复用物理文件，每次上传分别保留关联记录。删除文档或附件仅删除关联记录，物理内容保留，避免共享哈希与并发上传冲突。
 
-- 文件以 hash 命名存储在 `/home/static/{hash}`
-- 相同内容的文件只存一份物理文件，`files` 表中每条上传记录都保留
-- 删除文档时：先删除 `files` 表中关联记录，再检查 hash 是否仍被其他记录引用
-  - 若无引用 → 删除物理文件
-  - 若仍有引用 → 保留物理文件
+资产保存于 `VOEX_UPLOAD_DIR/{directory}/{uuid}`，处理后的图片使用 `.webp` 后缀，默认根目录 `/home/update`。数据库保存元数据，文件内容保存在磁盘。

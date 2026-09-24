@@ -2,7 +2,7 @@
 
 Current contract: users join multiple teams as owner/admin/member. Each user has exactly one personal team, created transactionally with registration. Personal teams allow members and projects, but cannot be deleted or transferred; their owner cannot leave.
 
-Teams -> projects -> one level of folders -> documents. Migration 003-teams adds team ownership, memberships, privileges JSON, project membership lists, join requests, invitations, shares, and document revision. Existing nested folders cause migration to stop rather than move data automatically.
+Teams -> projects -> one level of folders -> documents. The embedded schema includes team ownership, memberships, privileges JSON, project membership lists, join requests, invitations, shares, and document revision. Existing databases must have completed the 003-teams schema version.
 
 Owner/admin always edit every project. Members edit inherit-mode projects or projects listing them explicitly. An empty restricted list grants access only to owner/admin. Every team member can create a project; creating folders/documents requires edit permission in that project. Creator remains authorship metadata.
 
@@ -26,6 +26,4 @@ Browser links use /share#TOKEN or /join#TOKEN. Tokens are generated from 32 rand
 /shared-file GET/PUT uses X-Share-Token header and optional JWT. Any valid link holder can access that document only. Edit links allow anonymous content edits. Project edit rights override read links. Public PUT only accepts file_content and revision. No team/project/folder identifiers or contact details are exposed.
 /shared-file/attachments/:hash GET binds file_key+hash to the shared document. /shared-file/creator-avator is capability-scoped. Revocation takes effect on the next request. General /assets/upload and document /upload still require JWT; links never grant general upload or project access.
 
-Backup and verification directory is recorded in .team-backup-path. team-api-verification.json:108 API checks; focused-verification.json:6 checks; team-final-verification.json records browser scope and cleanup. Temporary accounts, teams, files and links were removed. Original 2 projects, 4 documents, 3 attachments remain in the original user's personal team.
-
-Invitation URL opening was blocked by browser safety policy; the API and team-number application/review UI were verified without circumventing it. Frontend was implemented locally and not uploaded. Server remains HTTP-only; TLS is outside this changeset. No unit tests were generated or run.
+Implementation: teams.go, workspace.go and shares.go. Configuration, build, deployment and verification are documented in README.md.

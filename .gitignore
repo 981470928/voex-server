@@ -1,10 +1,7 @@
-node_modules/
-logs/
-dist/
+bin/
+/voex-server
 .env
+logs/
 *.log
 .secrets/
-.auth-backup-path
-releases/auth-before-*/
-.team-backup-path
-releases/team-before-*/
+.go-backup-path
