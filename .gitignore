@@ -5,3 +5,5 @@ logs/
 *.log
 .secrets/
 .go-backup-path
+
+.gin-backup-path

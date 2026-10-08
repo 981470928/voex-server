@@ -31,4 +31,4 @@ General files <=200 MiB, avator <=5 MiB, thumbnail <=20 MiB. Images must be stat
 Images are decoded and re-encoded to WebP, max 512x512 avator and 1920x1920 thumbnail.
 Existing document attachments stay in /home/static. Physical orphan content is retained; no scheduled cleanup is configured.
 
-Implementation: auth.go and storage.go. Configuration, build, deployment and verification are documented in README.md.
+Implementation: internal/handler/auth.go and internal/handler/storage.go, with service/repository counterparts. Configuration, build, deployment and verification are documented in README.md.
