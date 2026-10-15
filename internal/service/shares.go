@@ -17,7 +17,7 @@ import (
 
 var shareTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 var shareAvatarPattern = regexp.MustCompile(`^/api/assets/([a-f0-9-]{36})$`)
-var shareAvatarStoragePattern = regexp.MustCompile(`^[a-f0-9-]{36}\.webp$`)
+var shareAvatarStoragePattern = regexp.MustCompile(`^[a-f0-9-]{36}(\.webp)?$`)
 
 func (s *Service) sharedDocument(db *gorm.DB, ctx context.Context, token string) (shared.Row, shared.Row) {
 	if !shareTokenPattern.MatchString(token) {
@@ -104,29 +104,43 @@ func (s *Service) RevokeDocumentShare(ctx context.Context, rawKey, id string) {
 	})
 }
 
-func (s *Service) GetSharedDocument(ctx context.Context, token string) shared.Row {
-	return s.tx(ctx, false, func(db *gorm.DB) any {
+func limitedDocumentDTO(db *gorm.DB, doc, permissions shared.Row, avatar string) shared.Row {
+	rows := repository.ListSharedAttachments(db, shared.String(doc["file_key"]))
+	attachments := make([]shared.Row, 0, len(rows))
+	for _, file := range rows {
+		attachments = append(attachments, shared.Row{"hash": file["hash"], "name": file["name"], "mime": file["mime"], "creator": shared.Row{"id": file["creator_id"], "name": file["creator_name"], "avator": ""}})
+	}
+	// A capability exposes only this document, never parent or contact data.
+	return shared.Row{"file_key": doc["file_key"], "file_name": doc["file_name"], "file_content": shared.String(doc["file_content"]), "created_at": shared.Timestamp(doc["created_at"]), "updated_at": shared.Timestamp(doc["updated_at"]), "revision": shared.Int64(doc["revision"]), "privileges": shared.Row{"mode": "inherit"}, "permissions": permissions, "creator": shared.Row{"id": doc["creator_id"], "name": shared.String(doc["creator_name"]), "avator": avatar}, "attachments": attachments}
+}
+
+func (s *Service) GetSharedDocument(ctx context.Context, token string, recordVisit bool) shared.Row {
+	user := identity.OptionalUser(ctx)
+	recordVisit = recordVisit && user != nil
+	return s.tx(ctx, recordVisit, func(db *gorm.DB) any {
 		doc, permissions := s.sharedDocument(db, ctx, token)
-		rows := repository.ListSharedAttachments(db, shared.String(doc["file_key"]))
-		attachments := make([]shared.Row, 0, len(rows))
-		for _, file := range rows {
-			attachments = append(attachments, shared.Row{"hash": file["hash"], "name": file["name"], "mime": file["mime"], "creator": shared.Row{"id": file["creator_id"], "name": file["creator_name"], "avator": ""}})
+		if recordVisit {
+			repository.RecordRecentFile(db, shared.String(user["id"]), doc)
 		}
 		avator := ""
 		if shared.String(doc["creator_avator"]) != "" {
 			avator = "/api/shared-file/creator-avator"
 		}
-		// A capability exposes only this document, never parent or contact data.
-		return shared.Row{"file_key": doc["file_key"], "file_name": doc["file_name"], "file_content": shared.String(doc["file_content"]), "created_at": shared.Timestamp(doc["created_at"]), "updated_at": shared.Timestamp(doc["updated_at"]), "revision": shared.Int64(doc["revision"]), "privileges": shared.Row{"mode": "inherit"}, "permissions": permissions, "creator": shared.Row{"id": doc["creator_id"], "name": doc["creator_name"], "avator": avator}, "attachments": attachments}
+		return limitedDocumentDTO(db, doc, permissions, avator)
 	}).(shared.Row)
 }
 
-func (s *Service) UpdateSharedDocument(ctx context.Context, token string, input shared.Row) shared.Row {
+func sharedContentInput(input shared.Row) (string, int64) {
 	content, contentOK := input["file_content"].(string)
 	version, versionOK := shareRevision(input["revision"])
 	if !contentOK || !versionOK || len(input) != 2 {
 		shared.Fail(400, "分享编辑仅允许提交正文和版本号")
 	}
+	return content, version
+}
+
+func (s *Service) UpdateSharedDocument(ctx context.Context, token string, input shared.Row) shared.Row {
+	content, version := sharedContentInput(input)
 	revision := s.tx(ctx, true, func(db *gorm.DB) any {
 		doc, permissions := s.sharedDocument(db, ctx, token)
 		if !shared.Bool(permissions["write"]) {
@@ -135,7 +149,7 @@ func (s *Service) UpdateSharedDocument(ctx context.Context, token string, input 
 		if version != shared.Int64(doc["revision"]) {
 			shared.Fail(409, "文件已被其他人修改，请保留本地内容后重新加载")
 		}
-		repository.UpdateSharedContent(db, doc["id"], content)
+		repository.UpdateSharedContent(db, doc["id"], content, shared.String(identity.OptionalUser(ctx)["id"]))
 		return shared.Int64(doc["revision"]) + 1
 	})
 	return shared.Row{"success": true, "revision": revision}
@@ -153,7 +167,7 @@ func (s *Service) SharedAttachment(ctx context.Context, token, hash string) file
 		}
 		return file
 	}).(shared.Row)
-	return filestore.Download{Path: s.Files.AttachmentPath(hash), Name: shared.String(file["name"]), MIME: "application/octet-stream", Cache: "no-store", Missing: "文件不存在"}
+	return filestore.Download{Key: s.Files.AttachmentKey(hash), Name: shared.String(file["name"]), MIME: "application/octet-stream", Cache: "no-store", Missing: "文件不存在"}
 }
 
 func (s *Service) SharedAvatar(ctx context.Context, token string) filestore.Download {
@@ -172,5 +186,5 @@ func (s *Service) SharedAvatar(ctx context.Context, token string) filestore.Down
 	if !shareAvatarStoragePattern.MatchString(shared.String(asset["storage_name"])) {
 		shared.Fail(404, "没有头像")
 	}
-	return filestore.Download{Path: s.Files.AssetPath("avator", shared.String(asset["storage_name"])), Name: "avator.webp", MIME: "image/webp", Inline: true, Cache: "no-store", Missing: "文件不存在"}
+	return filestore.Download{Key: s.Files.AssetKey("avator", shared.String(asset["storage_name"])), Name: "avator", MIME: shared.String(asset["mime"]), Inline: true, Cache: "no-store", Missing: "文件不存在"}
 }

@@ -5,14 +5,16 @@ Gin + GORM HTTP 服务：账号认证、团队与项目权限、单层目录、M
 ## 环境与运行
 
 - Go 1.27.1。服务器安装于 `/opt/go1.27.1`，`go` 和 `gofmt` 位于 `/usr/local/bin`。
-- Make 与 libvips 命令行工具：Ubuntu `apt-get install --no-install-recommends make libvips-tools`。
-- MySQL 8，完整表结构见 `internal/database/schema.sql`，连接配置见 `.env.example`。
+- Make（Linux 构建可用 `apt-get install --no-install-recommends make`）；图片校验使用 Go 标准库与 `golang.org/x/image/webp`，无需安装 libvips。
+- MySQL 8，初始表结构见 `internal/database/schema.sql`，最近文件与修改人迁移见 `internal/database/recent-files.sql`、`internal/database/document-details.sql`，连接配置见 `.env.example`。
+- Cloudflare R2 私有存储桶及该桶的 S3 API 读写凭据，配置方式见下方「存储配置」。
 
 ```sh
 cd /home/voex-server
 # 仅新部署需要复制示例；已有 .env 时保留现有配置。
 cp -n .env.example .env
 chmod 600 .env
+# 填写 .env 中的 MySQL 和 R2 配置后再启动。
 make build
 make check
 ./bin/voex-server
@@ -39,7 +41,7 @@ GOPROXY=https://goproxy.cn,direct go mod download
 | `internal/repository`、`internal/model` | GORM 查询与数据模型 |
 | `internal/database` | MySQL 连接、嵌入 schema、受控初始化 |
 | `internal/identity`、`internal/security`、`internal/shared` | 用户上下文、安全与公共校验 |
-| `internal/filestore` | 文件与图片处理、Range 下载 |
+| `internal/filestore` | R2 对象存储、临时上传与图片处理、Range 下载 |
 | `docs` | 完整结构规划和路由速查 |
 
 完整依赖方向、扩展约定和事务策略见 [项目结构](docs/architecture.md)，全部端点见 [路由速查](docs/routes.md)。账号与资产约定见 `AUTH-API.md`，团队与分享约定见 `TEAM-API.md`，数据库见 `db.md`。
@@ -48,11 +50,36 @@ Gin、GORM 及 MySQL 驱动版本固定在 `go.mod`；已有 Crypto/MySQL 底层
 
 ## 存储配置
 
-- `VOEX_STATIC_DIR`：默认 `/home/static`，保存按 SHA-256 命名的附件。
-- `VOEX_UPLOAD_DIR`：默认 `/home/update`，保存按目录和 UUID 命名的资产，`.incoming` 为临时上传目录。
-- `JWT_SECRET_FILE`：默认 `/home/server/.secrets/jwt-key`。保留密钥以维持现有登录会话。
+文件内容保存到 Cloudflare R2，MySQL 继续保存元数据和权限。使用 AWS SDK for Go v2 的 S3 API，region 固定为 `auto`；桶保持私有，现有 `/api/assets/...`、附件及分享下载均由后端完成权限校验和流式传输。此方式不需要开启桶公共访问或配置浏览器直传 CORS。
 
-这些目录及 `.env` 不属于代码清理范围。删除附件记录后保留物理哈希文件，避免共享内容及并发上传受到影响。
+1. 在 R2 管理界面创建 API token，选择 **Object Read & Write**，范围限定到 `voex-dev`。
+2. 将生成的 **Access Key ID**、**Secret Access Key** 填入本地 `.env`；不要使用普通 Cloudflare API token 替代 S3 密钥。
+3. 从桶设置复制 **S3 API endpoint**，按 `.env.example` 填写以下配置。受地域管辖的桶应使用控制台给出的对应 endpoint。
+
+```dotenv
+R2_ENDPOINT=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+R2_BUCKET=voex-dev
+R2_ACCESS_KEY_ID=YOUR_ACCESS_KEY_ID
+R2_SECRET_ACCESS_KEY=YOUR_SECRET_ACCESS_KEY
+```
+
+`R2_ENDPOINT` 不包含桶名，不能填写 `r2.dev` 公共访问域名。四项配置均必填，缺失时启动会明确报错。凭据仅保存在被 Git 忽略的 `.env` 或进程环境中。参考 [R2 密钥配置](https://developers.cloudflare.com/r2/api/tokens/)和 [Go SDK 官方示例](https://developers.cloudflare.com/r2/examples/aws/aws-sdk-go/)。
+
+| 内容 | R2 object key |
+| --- | --- |
+| 文档附件 | `attachments/{sha256}` |
+| 普通资产 | `assets/{directory}/{uuid}` |
+| 原始头像、缩略图 | `assets/{directory}/{uuid}`，MIME 按实际图片格式保存 |
+
+头像与缩略图只接受可完整解码的静态 PNG、JPEG、WebP，保留 5 MiB / 20 MiB 和 2000 万像素限制；校验通过后原图上传 R2，不缩放、压缩、转码或移除 metadata。历史 `.webp` 对象继续可读，接口返回格式保持现有约定。下载支持 HEAD、单段/多段 Range、ETag 和条件请求；HEAD 只读取对象元数据。超过 16 段的 Range 请求按完整文件响应，避免一次请求触发大量 R2 读取。
+
+- `VOEX_TEMP_DIR`：可选的可信绝对路径，默认系统临时目录。每个进程创建随机私有子目录 `voex-uploads-*`，仅存放上传和图片转换临时文件，请求结束后清理；自定义父目录应仅允许服务用户写入。异常退出留下的临时文件需在确认没有进程使用后手动清理。
+- `JWT_SECRET_FILE`：默认 `/home/server/.secrets/jwt-key`。保留密钥以维持现有登录会话。
+- 附件按内容哈希复用且禁止覆盖；删除关联记录或上传后的数据库提交失败时保留 R2 对象，避免影响其他文档。未提交的 UUID 资产会尝试删除，失败时记录日志；没有自动孤儿对象清理任务。
+
+### 从本地存储切换
+
+`VOEX_STATIC_DIR`、`VOEX_UPLOAD_DIR` 已不再使用，程序不会自动迁移或回退读取本地旧文件。有历史数据时，应先在原服务器把 `/home/static/{sha256}` 上传为 `attachments/{sha256}`，把 `/home/update/{directory}/{storage_name}` 上传为 `assets/{directory}/{storage_name}`，排除 `.incoming` 临时目录，再切换服务。对象 key 必须与数据库中的 hash、directory、storage_name 对应，数据库无需改表。原目录及 JWT 密钥应保留以便回滚。
 
 ## 部署
 

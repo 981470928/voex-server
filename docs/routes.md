@@ -56,15 +56,33 @@ GET 与 HEAD 使用相同权限规则，HEAD 不返回响应正文。分享端�
 | POST | `/api/workspace/initialize` | 初始化并读取指定团队工作区；需要登录。 | `internal/handler/workspace.go` |
 | POST | `/api/project` | 创建项目及默认文件夹；需要登录。 | `internal/handler/workspace.go` |
 | PUT | `/api/project/:projectKey` | 重命名有写入权限的项目；需要登录。 | `internal/handler/workspace.go` |
-| DELETE | `/api/project/:projectKey` | 删除已清空的项目；需要登录。 | `internal/handler/workspace.go` |
+| DELETE | `/api/project/:projectKey` | 有项目写权限可删除空项目；有子项时须用 `cascade=true` 确认级联删除。 | `internal/handler/workspace.go` |
 | GET/HEAD | `/api/project/:projectKey/tree` | 读取项目、文件夹和文档目录；需要登录。 | `internal/handler/workspace.go` |
 | POST | `/api/folder` | 在项目内创建一层文件夹；需要登录。 | `internal/handler/workspace.go` |
 | PUT | `/api/folder/:folderKey` | 重命名文件夹；需要登录。 | `internal/handler/workspace.go` |
-| DELETE | `/api/folder/:folderKey` | 删除已清空的文件夹；需要登录。 | `internal/handler/workspace.go` |
+| DELETE | `/api/folder/:folderKey` | 有所属项目写权限可删除空文件夹；有子项时须用 `cascade=true` 确认级联删除。 | `internal/handler/workspace.go` |
 | GET/HEAD | `/api/project/:projectKey/privileges` | 读取项目成员权限策略；需要登录且具有管理权限。 | `internal/handler/workspace.go` |
 | PUT | `/api/project/:projectKey/privileges` | 设置继承或指定成员权限；需要登录且具有管理权限。 | `internal/handler/workspace.go` |
 | POST | `/api/document` | 创建文档并解析所属项目和文件夹；需要登录。 | `internal/handler/workspace.go` |
 | GET/HEAD | `/api/document/:fileKey` | 读取文档正文、元数据和权限；需要登录。 | `internal/handler/workspace.go` |
+| GET/HEAD | `/api/document/:fileKey/details` | 重新校验项目读取权限，返回文件详情与路径，不更新最近访问。 | `internal/handler/workspace.go` |
 | PUT | `/api/document/:fileKey` | 修改文档名称或按版本保存正文；需要登录。 | `internal/handler/workspace.go` |
 | DELETE | `/api/document/:fileKey` | 删除文档及附件关联；需要登录。 | `internal/handler/workspace.go` |
 | GET/HEAD | `/api/documents` | 按名称搜索当前用户可读文档的元数据；需要登录。 | `internal/handler/workspace.go` |
+| GET/HEAD | `/api/recent-files?limit=N` | 按前端传入的条数读取最近记录；GET 响应写出后按同一条数异步清理。 | `internal/handler/recent.go` |
+| GET/HEAD | `/api/recent-files/:fileKey` | 凭本人记录及当前有效的项目/分享授权读取单个文件，GET 更新访问时间。 | `internal/handler/recent.go` |
+| GET/HEAD | `/api/recent-files/:fileKey/details` | 重新校验文件读取权限，仅项目可访问时返回路径；不读取正文、附件或更新最近访问。 | `internal/handler/recent.go` |
+| PUT | `/api/recent-files/:fileKey` | 重新检查编辑权限，只允许正文和 revision，冲突返回 409。 | `internal/handler/recent.go` |
+| DELETE | `/api/recent-files/:fileKey` | 仅移除本人的查看记录，无文件删除副作用。 | `internal/handler/recent.go` |
+| GET/HEAD | `/api/recent-files/:fileKey/attachments/:hash` | 重新检查文件读取权限并下载该文件附件。 | `internal/handler/recent.go` |
+
+最近文件 API 合同见 [RECENT-API.md](RECENT-API.md)，文件详情与修改人约定见 [FILE-DETAILS-API.md](FILE-DETAILS-API.md)。
+
+## 项目与文件夹删除
+
+`DELETE /api/project/:projectKey` 和 `DELETE /api/folder/:folderKey` 接受可选查询参数 `cascade`，仅允许单个小写 `true` 或 `false`，默认 `false`。重复值、数组形式、空值及其他值返回 HTTP 400。
+
+- 不带 `cascade` 或传 `cascade=false`：空项目、空文件夹直接删除；存在任意子项时返回 HTTP 409，提示确认连同所有子项一起删除，不修改数据。空文件夹也属于项目的子项。
+- 用户确认后以 `cascade=true` 重试：删除目标及其全部后代文件夹、文档和附件关联；文档分享、最近访问记录以及项目成员记录由外键同步清理。文件夹删除范围限定在所属项目及目标子树，不影响同级文件夹。
+- 成功返回 HTTP 200 和 `{ "success": true }`。权限校验、子项检查及所有删除均在同一个工作区写锁事务中完成，任何失败均回滚。
+- 删除附件关联不会删除共享的 R2 哈希对象；物理对象需由独立清理流程处理。本次不调整目录层级限制或数据库结构。

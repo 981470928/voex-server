@@ -25,10 +25,10 @@ AUTH_ALLOWED_ORIGINS can override trusted origins (comma separated).
 
 Project/document/attachment access follows team and project permissions described in TEAM-API.md. Creator name/avator reflect the current profile.
 
-Upload storage: /home/update/{path}/{server-generated-uuid}. Directories created as needed.
-Each path segment: [A-Za-z0-9_-]{1,64}, relative path <=255 chars. No dots, backslash, absolute paths or symlinks.
+Upload storage: private R2 objects at assets/{path}/{server-generated-uuid}; new images retain their original bytes and actual MIME type. Existing converted .webp objects remain readable. API URLs and authorization remain unchanged.
+Each path segment: [A-Za-z0-9_-]{1,64}, relative path <=255 chars. No dots, backslash or absolute paths.
 General files <=200 MiB, avator <=5 MiB, thumbnail <=20 MiB. Images must be static JPEG/PNG/WebP <=20M pixels.
-Images are decoded and re-encoded to WebP, max 512x512 avator and 1920x1920 thumbnail.
-Existing document attachments stay in /home/static. Physical orphan content is retained; no scheduled cleanup is configured.
+Images are checked for supported format, dimensions, static content and complete decoding using Go; no libvips dependency, resizing, re-encoding or metadata removal. PNG/JPEG/WebP assets and shared creator avatars are served inline with their actual MIME type.
+Document attachments use R2 keys attachments/{sha256}. Shared hash objects are retained after record deletion; no scheduled orphan cleanup is configured. Existing local files must be migrated before switching; see README.md. Local temporary files are used only to stage uploads for validation and R2 transfer.
 
 Implementation: internal/handler/auth.go and internal/handler/storage.go, with service/repository counterparts. Configuration, build, deployment and verification are documented in README.md.

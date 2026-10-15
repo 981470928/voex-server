@@ -6,7 +6,7 @@ import (
 )
 
 func ActiveSharedDocument(db *gorm.DB, tokenHash string) shared.Row {
-	return One(DocumentQuery(db, true).Select(DocumentColumns+",d.file_content,s.permission").Joins("JOIN file_shares s ON s.document_id=d.id").Where("s.token_hash=? AND s.revoked_at IS NULL", tokenHash))
+	return One(DocumentQuery(db, true).Select(DocumentColumns+",d.file_content,s.permission,s.id AS share_id").Joins("JOIN file_shares s ON s.document_id=d.id").Where("s.token_hash=? AND s.revoked_at IS NULL", tokenHash))
 }
 
 func ListDocumentShares(db *gorm.DB, documentID any) []shared.Row {
@@ -29,10 +29,13 @@ func ListSharedAttachments(db *gorm.DB, fileKey string) []shared.Row {
 	return Rows(db.Table("files AS f").Select("f.hash,f.name,f.mime,u.id AS creator_id,u.name AS creator_name").Joins("LEFT JOIN users u ON u.id=f.creator_id").Where("f.file_key=?", fileKey).Order("f.id"))
 }
 
-func UpdateSharedContent(db *gorm.DB, documentID any, content string) {
-	Must(db.Table("documents").Where("id=?", documentID).Updates(map[string]any{"file_content": content, "revision": gorm.Expr("revision+1")}))
+func UpdateSharedContent(db *gorm.DB, documentID any, content, userID string) {
+	values := documentUpdateActor(userID)
+	values["file_content"] = content
+	values["revision"] = gorm.Expr("revision+1")
+	Must(db.Table("documents").Where("id=?", documentID).Updates(values))
 }
 
 func SharedCreatorAvatar(db *gorm.DB, assetID string, creatorID any) shared.Row {
-	return One(db.Table("assets").Where("id=? AND creator_id=? AND directory='avator' AND mime='image/webp'", assetID, creatorID))
+	return One(db.Table("assets").Where("id=? AND creator_id=? AND directory='avator' AND mime IN ?", assetID, creatorID, []string{"image/png", "image/jpeg", "image/webp"}))
 }

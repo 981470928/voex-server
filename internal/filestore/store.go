@@ -7,17 +7,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
+
+	_ "golang.org/x/image/webp"
 	"voex-server/internal/shared"
 )
 
@@ -25,52 +23,12 @@ var directoryPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}(/[A-Za-z0-9_-]{1
 var attachmentHashPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var assetStoragePattern = regexp.MustCompile(`^[a-f0-9-]{36}(\.webp)?$`)
 
-// Store owns local asset and content-addressed attachment directories.
-type Store struct{ staticDir, uploadDir, tempDir string }
-
-func New(staticDir, uploadDir string) *Store {
-	store := &Store{staticDir: filepath.Clean(staticDir), uploadDir: filepath.Clean(uploadDir)}
-	store.tempDir = filepath.Join(store.uploadDir, ".incoming")
-	for _, directory := range []string{store.staticDir, store.uploadDir, store.tempDir} {
-		if !filepath.IsAbs(directory) {
-			panic("Storage directory must be absolute")
-		}
-		shared.Must(os.MkdirAll(directory, 0700))
-		info, err := os.Lstat(directory)
-		shared.Must(err)
-		resolved, err := filepath.EvalSymlinks(directory)
-		shared.Must(err)
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || resolved != directory {
-			panic("Storage directory must not be a symbolic link")
-		}
-	}
-	return store
-}
-
 func SafeDirectory(value any) string {
 	directory, ok := value.(string)
 	if !ok || len(directory) > 255 || !directoryPattern.MatchString(directory) {
 		shared.Fail(400, "path 只能包含字母、数字、短横线、下划线和分层斜杠")
 	}
 	return directory
-}
-
-func (s *Store) storageDirectory(directory string) string {
-	SafeDirectory(directory)
-	resolved := s.uploadDir
-	for _, part := range strings.Split(directory, "/") {
-		resolved = filepath.Join(resolved, part)
-		err := os.Mkdir(resolved, 0700)
-		if err != nil && !os.IsExist(err) {
-			shared.Must(err)
-		}
-		info, err := os.Lstat(resolved)
-		actual, realErr := filepath.EvalSymlinks(resolved)
-		if err != nil || realErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || actual != resolved {
-			shared.Fail(400, "上传目录不合法")
-		}
-	}
-	return resolved
 }
 
 type Upload struct {
@@ -177,56 +135,59 @@ func ComputeHash(filename string) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func copyStorageFile(source, destination string, reuse bool) {
-	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if reuse && os.IsExist(err) {
-		return
-	}
-	shared.Must(err)
-	complete := false
-	defer func() {
-		_ = output.Close()
-		if !complete {
-			_ = os.Remove(destination)
-		}
-	}()
-	input, err := os.Open(source)
-	shared.Must(err)
-	defer input.Close()
-	_, err = io.Copy(output, input)
-	shared.Must(err)
-	shared.Must(output.Close())
-	complete = true
-}
-
-func imageMetadata(ctx context.Context, filename string) (map[string]string, error) {
-	output, err := exec.CommandContext(ctx, "vipsheader", "-a", filename).Output()
+// validatedImage checks the actual image bytes without altering the uploaded file.
+func validatedImage(filename string) (string, error) {
+	file, err := os.Open(filename)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	metadata := map[string]string{}
-	for _, line := range strings.Split(string(output), "\n") {
-		key, value, found := strings.Cut(line, ":")
-		if found {
-			metadata[strings.TrimSpace(key)] = strings.TrimSpace(value)
-		}
+	defer file.Close()
+	config, format, err := image.DecodeConfig(file)
+	if err != nil {
+		return "", err
 	}
-	return metadata, nil
+	mimeType := ""
+	switch format {
+	case "png":
+		mimeType = "image/png"
+	case "jpeg":
+		mimeType = "image/jpeg"
+	case "webp":
+		mimeType = "image/webp"
+	default:
+		return "", fmt.Errorf("unsupported image format")
+	}
+	if config.Width < 1 || config.Height < 1 || config.Width > 20000000/config.Height {
+		return "", fmt.Errorf("invalid image dimensions")
+	}
+	if !staticImage(filename, format) {
+		return "", fmt.Errorf("animated or malformed image")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	decoded, decodedFormat, err := image.Decode(file)
+	if err != nil {
+		return "", err
+	}
+	if decodedFormat != format || decoded.Bounds().Dx() != config.Width || decoded.Bounds().Dy() != config.Height {
+		return "", fmt.Errorf("inconsistent image dimensions")
+	}
+	return mimeType, nil
 }
 
-// libvips exposes page counts for WebP. Inspect animation chunks as well so animated
-// PNG/WebP cannot silently become static images on a loader without animation support.
-func staticImage(filename string, loader string) bool {
+// Inspect animation chunks so a decoder cannot silently accept only the first frame.
+func staticImage(filename string, format string) bool {
 	file, err := os.Open(filename)
 	if err != nil {
 		return false
 	}
 	defer file.Close()
-	if loader == "jpegload" {
+	if format == "jpeg" {
 		return true
 	}
 	header := make([]byte, 12)
-	if loader == "pngload" {
+	if format == "png" {
 		if _, err = io.ReadFull(file, header[:8]); err != nil || string(header[:8]) != "\x89PNG\r\n\x1a\n" {
 			return false
 		}
@@ -240,96 +201,51 @@ func staticImage(filename string, loader string) bool {
 				return false
 			}
 			if kind == "IEND" {
-				return true
+				_, err = io.ReadFull(file, header[:4])
+				return size == 0 && err == nil
 			}
 			if _, err = io.CopyN(io.Discard, file, size+4); err != nil {
 				return false
 			}
 		}
 	}
-	if loader == "webpload" {
+	if format == "webp" {
 		if _, err = io.ReadFull(file, header); err != nil || string(header[:4]) != "RIFF" || string(header[8:12]) != "WEBP" {
 			return false
 		}
-		for {
-			_, err = io.ReadFull(file, header[:8])
-			if errors.Is(err, io.EOF) {
-				return true
+		info, err := file.Stat()
+		remaining := int64(binary.LittleEndian.Uint32(header[4:8])) - 4
+		if err != nil || remaining < 0 || remaining+12 != info.Size() {
+			return false
+		}
+		for remaining > 0 {
+			if remaining < 8 {
+				return false
 			}
-			if err != nil {
+			if _, err = io.ReadFull(file, header[:8]); err != nil {
 				return false
 			}
 			size := int64(binary.LittleEndian.Uint32(header[4:8]))
+			remaining -= 8
+			padded := size + size%2
+			if padded > remaining {
+				return false
+			}
 			if string(header[:4]) == "ANIM" || string(header[:4]) == "ANMF" {
 				return false
 			}
-			if _, err = io.CopyN(io.Discard, file, size+(size%2)); err != nil {
+			if _, err = io.CopyN(io.Discard, file, padded); err != nil {
 				return false
 			}
+			remaining -= padded
 		}
+		return true
 	}
 	return false
 }
 
-func convertStorageImage(ctx context.Context, source, destination, directory string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	metadata, err := imageMetadata(ctx, source)
-	if err != nil {
-		return err
-	}
-	width, widthErr := strconv.ParseInt(metadata["width"], 10, 64)
-	height, heightErr := strconv.ParseInt(metadata["height"], 10, 64)
-	if widthErr != nil || heightErr != nil || width < 1 || height < 1 || width > 20000000/height {
-		return fmt.Errorf("invalid image dimensions")
-	}
-	if pages := metadata["n-pages"]; pages != "" && pages != "1" {
-		return fmt.Errorf("animated image")
-	}
-	if !staticImage(source, metadata["vips-loader"]) {
-		return fmt.Errorf("unsupported image")
-	}
-	maximum := "1920"
-	if directory == "avator" {
-		maximum = "512"
-	}
-	// thumbnail autorotates EXIF orientation and size=down forbids enlargement.
-	return exec.CommandContext(ctx, "vips", "thumbnail", source+"[fail-on=error]", destination+"[Q=85,strip]", maximum, "--height", maximum, "--size", "down").Run()
-}
-
-// Download carries a previously authorized file and its response policy.
-type Download struct {
-	Path, Name, MIME, Cache, Missing string
-	Inline, SameOrigin               bool
-}
-
-// Serve supports HEAD and byte ranges without following symlinks.
-func Serve(w http.ResponseWriter, r *http.Request, download Download) {
-	filename, name, mimeType, inline, cache, missing := download.Path, download.Name, download.MIME, download.Inline, download.Cache, download.Missing
-	if download.SameOrigin {
-		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
-	}
-	// O_NOFOLLOW closes the lstat/open race and never serves a symlink target.
-	file, err := os.OpenFile(filename, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		shared.Fail(404, missing)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		shared.Fail(404, missing)
-	}
-	disposition := "attachment"
-	if inline {
-		disposition = "inline"
-	}
-	encoded := strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
-	w.Header().Set("Content-Type", mimeType)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	w.Header().Set("Cache-Control", cache)
-	w.Header().Set("Content-Disposition", disposition+"; filename*=UTF-8''"+encoded)
-	http.ServeContent(w, r, name, info.ModTime(), file)
+func IsImageMIME(mimeType string) bool {
+	return mimeType == "image/png" || mimeType == "image/jpeg" || mimeType == "image/webp"
 }
 
 // Remove cleans up an incoming multipart body after its request finishes.
@@ -340,26 +256,24 @@ func (u Upload) Remove() {
 }
 
 type StoredAsset struct {
-	Path, StorageName, MIME string
-	Size                    int64
+	StorageName, MIME string
+	Size              int64
+	key               string
+	store             *Store
 }
 
+// Remove rolls back an uncommitted UUID asset, even after the request is canceled.
 func (a StoredAsset) Remove() {
-	if a.Path != "" {
-		_ = os.Remove(a.Path)
+	if a.store != nil && a.key != "" {
+		a.store.removeAsset(a.key)
 	}
 }
 
-// SaveAsset normalizes supported images and stores other assets as opaque bytes.
+// SaveAsset validates supported images and stores their original bytes in R2.
 func (s *Store) SaveAsset(ctx context.Context, upload Upload, id, directory string) (stored StoredAsset) {
-	destination := s.storageDirectory(directory)
+	SafeDirectory(directory)
 	stored = StoredAsset{StorageName: id, MIME: "application/octet-stream", Size: upload.Size}
-	complete := false
-	defer func() {
-		if !complete {
-			stored.Remove()
-		}
-	}()
+	source := upload.Path
 	if directory == "avator" || directory == "thumbnail" {
 		maximum := int64(20)
 		if directory == "avator" {
@@ -368,34 +282,40 @@ func (s *Store) SaveAsset(ctx context.Context, upload Upload, id, directory stri
 		if upload.Size > maximum*1024*1024 {
 			shared.Fail(413, fmt.Sprintf("图片不能超过 %d MB", maximum))
 		}
-		stored.StorageName += ".webp"
-		stored.Path = filepath.Join(destination, stored.StorageName)
-		if err := convertStorageImage(ctx, upload.Path, stored.Path, directory); err != nil {
+		mimeType, err := validatedImage(source)
+		if err != nil {
 			shared.Fail(400, "请选择有效的静态 PNG、JPEG 或 WebP 图片（最多 2000 万像素）")
 		}
-		info, err := os.Stat(stored.Path)
-		shared.Must(err)
-		stored.MIME, stored.Size = "image/webp", info.Size()
-	} else {
-		stored.Path = filepath.Join(destination, stored.StorageName)
-		copyStorageFile(upload.Path, stored.Path, false)
+		stored.MIME = mimeType
 	}
-	complete = true
+	key := s.AssetKey(directory, stored.StorageName)
+	if err := s.putObject(ctx, key, source, stored.MIME); err != nil {
+		if storageStatus(err) == http.StatusPreconditionFailed {
+			shared.Fail(409, "资源标识冲突，请重试")
+		}
+		storageFailure("upload asset", err)
+	}
+	stored.key, stored.store = key, s
 	return stored
 }
 
-func (s *Store) AssetPath(directory, storageName string) string {
+func (s *Store) AssetKey(directory, storageName string) string {
+	SafeDirectory(directory)
 	if !assetStoragePattern.MatchString(storageName) {
 		shared.Fail(404, "文件不存在")
 	}
-	return filepath.Join(s.storageDirectory(directory), storageName)
+	return "assets/" + directory + "/" + storageName
 }
-func (s *Store) AttachmentPath(hash string) string {
+func (s *Store) AttachmentKey(hash string) string {
 	if !attachmentHashPattern.MatchString(hash) {
 		shared.Fail(404, "附件不存在")
 	}
-	return filepath.Join(s.staticDir, hash)
+	return "attachments/" + hash
 }
-func (s *Store) SaveAttachment(upload Upload, hash string) {
-	copyStorageFile(upload.Path, s.AttachmentPath(hash), true)
+func (s *Store) SaveAttachment(ctx context.Context, upload Upload, hash string) {
+	err := s.putObject(ctx, s.AttachmentKey(hash), upload.Path, "application/octet-stream")
+	// Content-addressed objects are immutable and can be shared across documents.
+	if err != nil && storageStatus(err) != http.StatusPreconditionFailed {
+		storageFailure("upload attachment", err)
+	}
 }

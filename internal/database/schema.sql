@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS `auth_sessions` (
 CREATE TABLE IF NOT EXISTS `documents` (
   `id` int NOT NULL AUTO_INCREMENT,
   `file_key` varchar(64) NOT NULL,
-  `file_name` varchar(255) NOT NULL DEFAULT 'untitled.md',
+  `file_name` varchar(255) NOT NULL DEFAULT 'untitled',
   `file_content` longtext,
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

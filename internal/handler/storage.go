@@ -2,7 +2,6 @@ package handler
 
 import (
 	"github.com/gin-gonic/gin"
-	"voex-server/internal/filestore"
 	"voex-server/internal/shared"
 )
 
@@ -37,7 +36,7 @@ func (h *Handler) storageUploadAsset(c *gin.Context) {
 }
 func (h *Handler) storageGetAsset(c *gin.Context) {
 	file := h.Service.AssetDownload(c.Request.Context(), c.Param("id"))
-	filestore.Serve(c.Writer, c.Request, file)
+	h.Service.Files.Serve(c.Writer, c.Request, file)
 }
 func (h *Handler) storageUploadAttachment(c *gin.Context) {
 	upload := h.Service.Files.ReadUpload(c.Writer, c.Request, false)
@@ -48,7 +47,7 @@ func (h *Handler) storageListAttachments(c *gin.Context) {
 }
 func (h *Handler) storageDownloadAttachment(c *gin.Context) {
 	file := h.Service.AttachmentDownload(c.Request.Context(), c.Param("fileKey"), c.Param("hash"))
-	filestore.Serve(c.Writer, c.Request, file)
+	h.Service.Files.Serve(c.Writer, c.Request, file)
 }
 func (h *Handler) storageAttachmentProgress(c *gin.Context) {
 	c.JSON(200, h.Service.AttachmentProgress(c.Request.Context(), c.Param("fileKey"), c.Param("hash")))

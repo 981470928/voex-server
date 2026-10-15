@@ -2,8 +2,8 @@ package handler
 
 import (
 	"github.com/gin-gonic/gin"
+	"net/http"
 	"time"
-	"voex-server/internal/filestore"
 	"voex-server/internal/shared"
 	"voex-server/internal/transport"
 )
@@ -52,16 +52,16 @@ func (h *Handler) shareRevoke(c *gin.Context) {
 	c.JSON(200, shared.Row{"success": true})
 }
 func (h *Handler) shareGetDocument(c *gin.Context) {
-	c.JSON(200, h.Service.GetSharedDocument(c.Request.Context(), c.GetHeader("X-Share-Token")))
+	c.JSON(200, h.Service.GetSharedDocument(c.Request.Context(), c.GetHeader("X-Share-Token"), c.Request.Method == http.MethodGet))
 }
 func (h *Handler) shareUpdateDocument(c *gin.Context) {
 	c.JSON(200, h.Service.UpdateSharedDocument(c.Request.Context(), c.GetHeader("X-Share-Token"), transport.Body(c)))
 }
 func (h *Handler) shareGetAttachment(c *gin.Context) {
 	file := h.Service.SharedAttachment(c.Request.Context(), c.GetHeader("X-Share-Token"), c.Param("hash"))
-	filestore.Serve(c.Writer, c.Request, file)
+	h.Service.Files.Serve(c.Writer, c.Request, file)
 }
 func (h *Handler) shareGetAvatar(c *gin.Context) {
 	file := h.Service.SharedAvatar(c.Request.Context(), c.GetHeader("X-Share-Token"))
-	filestore.Serve(c.Writer, c.Request, file)
+	h.Service.Files.Serve(c.Writer, c.Request, file)
 }

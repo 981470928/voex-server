@@ -2,7 +2,6 @@
 package router
 
 import (
-	"github.com/gin-gonic/gin"
 	"log"
 	"net/http"
 	"strings"
@@ -12,6 +11,8 @@ import (
 	"voex-server/internal/service"
 	"voex-server/internal/shared"
 	"voex-server/internal/transport"
+
+	"github.com/gin-gonic/gin"
 )
 
 type Router struct{ engine *gin.Engine }
@@ -32,8 +33,11 @@ func New(s *service.Service, origins []string, logger *log.Logger) *Router {
 	optional := public.Group("")
 	optional.Use(middleware.Authentication(s, true))
 	h.RegisterAuthRoutes(public, protected)
+	h.RegisterAIRoutes(protected)
 	h.RegisterTeamRoutes(public, protected)
 	h.RegisterWorkspaceRoutes(protected)
+	h.RegisterTrashRoutes(protected)
+	h.RegisterRecentRoutes(protected)
 	h.RegisterStorageRoutes(protected)
 	h.RegisterShareRoutes(optional, protected)
 	// 未匹配的 /api 路由：沿用先登录校验、再返回接口不存在的行为。

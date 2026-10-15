@@ -27,16 +27,21 @@ type AuthSession struct {
 func (AuthSession) TableName() string { return "auth_sessions" }
 
 type Document struct {
-	ID          int64      `gorm:"column:id;primaryKey;autoIncrement" json:"-"`
-	FileKey     string     `gorm:"column:file_key" json:"-"`
-	FileName    string     `gorm:"column:file_name" json:"-"`
-	FileContent *string    `gorm:"column:file_content" json:"-"`
-	CreatedAt   *time.Time `gorm:"column:created_at;autoCreateTime:false" json:"-"`
-	UpdatedAt   *time.Time `gorm:"column:updated_at;autoUpdateTime:false" json:"-"`
-	FolderID    int64      `gorm:"column:folder_id" json:"-"`
-	CreatorID   *string    `gorm:"column:creator_id" json:"-"`
-	Privileges  string     `gorm:"column:privileges" json:"-"`
-	Revision    int64      `gorm:"column:revision" json:"-"`
+	ID                 int64      `gorm:"column:id;primaryKey;autoIncrement" json:"-"`
+	FileKey            string     `gorm:"column:file_key" json:"-"`
+	FileName           string     `gorm:"column:file_name" json:"-"`
+	FileContent        *string    `gorm:"column:file_content" json:"-"`
+	CreatedAt          *time.Time `gorm:"column:created_at;autoCreateTime:false" json:"-"`
+	UpdatedAt          *time.Time `gorm:"column:updated_at;autoUpdateTime:false" json:"-"`
+	FolderID           int64      `gorm:"column:folder_id" json:"-"`
+	CreatorID          *string    `gorm:"column:creator_id" json:"-"`
+	UpdatedBy          *string    `gorm:"column:updated_by" json:"-"`
+	UpdatedByAnonymous bool       `gorm:"column:updated_by_anonymous" json:"-"`
+	Privileges         string     `gorm:"column:privileges" json:"-"`
+	Revision           int64      `gorm:"column:revision" json:"-"`
+	DeletedAt          *time.Time `gorm:"column:deleted_at" json:"-"`
+	DeletedBy          *string    `gorm:"column:deleted_by" json:"-"`
+	ExpiresAt          *time.Time `gorm:"column:expires_at" json:"-"`
 }
 
 func (Document) TableName() string { return "documents" }
@@ -53,6 +58,16 @@ type FileShare struct {
 
 func (FileShare) TableName() string { return "file_shares" }
 
+type RecentFile struct {
+	UserID     string    `gorm:"column:user_id;primaryKey" json:"-"`
+	DocumentID int64     `gorm:"column:document_id;primaryKey;autoIncrement:false" json:"-"`
+	ShareID    *string   `gorm:"column:share_id" json:"-"`
+	FileName   string    `gorm:"column:file_name" json:"-"`
+	ViewedAt   time.Time `gorm:"column:viewed_at" json:"-"`
+}
+
+func (RecentFile) TableName() string { return "recent_files" }
+
 type File struct {
 	ID         int64      `gorm:"column:id;primaryKey;autoIncrement" json:"-"`
 	FileKey    string     `gorm:"column:file_key" json:"-"`
@@ -68,14 +83,17 @@ type File struct {
 func (File) TableName() string { return "files" }
 
 type Folder struct {
-	ID         int64     `gorm:"column:id;primaryKey;autoIncrement" json:"-"`
-	FolderKey  string    `gorm:"column:folder_key" json:"-"`
-	ProjectID  int64     `gorm:"column:project_id" json:"-"`
-	ParentID   *int64    `gorm:"column:parent_id" json:"-"`
-	Name       string    `gorm:"column:name" json:"-"`
-	CreatedAt  time.Time `gorm:"column:created_at;autoCreateTime:false" json:"-"`
-	UpdatedAt  time.Time `gorm:"column:updated_at;autoUpdateTime:false" json:"-"`
-	Privileges string    `gorm:"column:privileges" json:"-"`
+	ID         int64      `gorm:"column:id;primaryKey;autoIncrement" json:"-"`
+	FolderKey  string     `gorm:"column:folder_key" json:"-"`
+	ProjectID  int64      `gorm:"column:project_id" json:"-"`
+	ParentID   *int64     `gorm:"column:parent_id" json:"-"`
+	Name       string     `gorm:"column:name" json:"-"`
+	CreatedAt  time.Time  `gorm:"column:created_at;autoCreateTime:false" json:"-"`
+	UpdatedAt  time.Time  `gorm:"column:updated_at;autoUpdateTime:false" json:"-"`
+	Privileges string     `gorm:"column:privileges" json:"-"`
+	DeletedAt  *time.Time `gorm:"column:deleted_at" json:"-"`
+	DeletedBy  *string    `gorm:"column:deleted_by" json:"-"`
+	ExpiresAt  *time.Time `gorm:"column:expires_at" json:"-"`
 }
 
 func (Folder) TableName() string { return "folders" }

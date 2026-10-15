@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 	"voex-server/internal/service"
@@ -22,7 +23,7 @@ func (h *Handler) RegisterWorkspaceRoutes(protected *gin.RouterGroup) {
 	protected.POST("/project", h.workspaceCreateProject)
 	// PUT /api/project/:projectKey：重命名有写入权限的项目；需要登录。
 	protected.PUT("/project/:projectKey", h.workspaceRenameProject)
-	// DELETE /api/project/:projectKey：删除已清空的项目；需要登录。
+	// DELETE /api/project/:projectKey：删除项目；有子项时需 cascade=true 确认级联删除，需要写入权限。
 	protected.DELETE("/project/:projectKey", h.workspaceDeleteProject)
 	// GET/HEAD /api/project/:projectKey/tree：读取项目、文件夹和文档目录；需要登录。
 	protected.Match([]string{http.MethodGet, http.MethodHead}, "/project/:projectKey/tree", h.workspaceProjectTree)
@@ -30,7 +31,7 @@ func (h *Handler) RegisterWorkspaceRoutes(protected *gin.RouterGroup) {
 	protected.POST("/folder", h.workspaceCreateFolder)
 	// PUT /api/folder/:folderKey：重命名文件夹；需要登录。
 	protected.PUT("/folder/:folderKey", h.workspaceRenameFolder)
-	// DELETE /api/folder/:folderKey：删除已清空的文件夹；需要登录。
+	// DELETE /api/folder/:folderKey：删除文件夹；有子项时需 cascade=true 确认级联删除，需要写入权限。
 	protected.DELETE("/folder/:folderKey", h.workspaceDeleteFolder)
 	// GET/HEAD /api/project/:projectKey/privileges：读取项目成员权限策略；需要登录且具有管理权限。
 	protected.Match([]string{http.MethodGet, http.MethodHead}, "/project/:projectKey/privileges", h.workspaceProjectPrivileges)
@@ -40,6 +41,8 @@ func (h *Handler) RegisterWorkspaceRoutes(protected *gin.RouterGroup) {
 	protected.POST("/document", h.workspaceCreateDocument)
 	// GET/HEAD /api/document/:fileKey：读取文档正文、元数据和权限；需要登录。
 	protected.Match([]string{http.MethodGet, http.MethodHead}, "/document/:fileKey", h.workspaceGetDocument)
+	// GET/HEAD /api/document/:fileKey/details：只读取文件详情及可访问路径，不记录最近访问。
+	protected.Match([]string{http.MethodGet, http.MethodHead}, "/document/:fileKey/details", h.workspaceGetDocumentDetails)
 	// PUT /api/document/:fileKey：修改文档名称或按版本保存正文；需要登录。
 	protected.PUT("/document/:fileKey", h.workspaceUpdateDocument)
 	// DELETE /api/document/:fileKey：删除文档及附件关联；需要登录。
@@ -70,6 +73,26 @@ func workspaceQueryValue(c *gin.Context, field string) (any, bool) {
 		}
 	}
 	return nil, false
+}
+
+func workspaceDeleteCascade(c *gin.Context) bool {
+	query, err := url.ParseQuery(c.Request.URL.RawQuery)
+	if err != nil {
+		shared.Fail(400, "删除参数格式错误")
+	}
+	for key := range query {
+		if strings.HasPrefix(key, "cascade[") {
+			shared.Fail(400, "cascade 只能是单个 true 或 false")
+		}
+	}
+	values, present := query["cascade"]
+	if !present {
+		return false
+	}
+	if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
+		shared.Fail(400, "cascade 只能是单个 true 或 false")
+	}
+	return values[0] == "true"
 }
 
 // 初始化兼容历史接口的空请求及 JSON 数组，仅从 JSON 对象读取 team_key。
@@ -142,7 +165,7 @@ func (h *Handler) workspaceRenameProject(c *gin.Context) {
 
 func (h *Handler) workspaceDeleteProject(c *gin.Context) {
 	key := shared.Key(c.Param("projectKey"), "项目标识")
-	h.Service.DeleteProject(c.Request.Context(), key)
+	h.Service.DeleteProject(c.Request.Context(), key, workspaceDeleteCascade(c))
 	c.JSON(http.StatusOK, shared.Row{"success": true})
 }
 
@@ -171,7 +194,7 @@ func (h *Handler) workspaceRenameFolder(c *gin.Context) {
 
 func (h *Handler) workspaceDeleteFolder(c *gin.Context) {
 	key := shared.Key(c.Param("folderKey"), "文件夹标识")
-	h.Service.DeleteFolder(c.Request.Context(), key)
+	h.Service.DeleteFolder(c.Request.Context(), key, workspaceDeleteCascade(c))
 	c.JSON(http.StatusOK, shared.Row{"success": true})
 }
 
@@ -188,7 +211,7 @@ func (h *Handler) workspaceSetProjectPrivileges(c *gin.Context) {
 
 func (h *Handler) workspaceCreateDocument(c *gin.Context) {
 	body := transport.Body(c)
-	fileName := "untitled.md"
+	fileName := "untitled"
 	if value, present := body["file_name"]; present {
 		fileName = shared.Name(value, "文档名称")
 	}
@@ -201,7 +224,12 @@ func (h *Handler) workspaceCreateDocument(c *gin.Context) {
 
 func (h *Handler) workspaceGetDocument(c *gin.Context) {
 	key := shared.Key(c.Param("fileKey"), "文档标识")
-	c.JSON(http.StatusOK, h.Service.GetDocument(c.Request.Context(), key))
+	c.JSON(http.StatusOK, h.Service.GetDocument(c.Request.Context(), key, c.Request.Method == http.MethodGet))
+}
+
+func (h *Handler) workspaceGetDocumentDetails(c *gin.Context) {
+	key := shared.Key(c.Param("fileKey"), "文档标识")
+	c.JSON(http.StatusOK, h.Service.GetDocumentDetails(c.Request.Context(), key))
 }
 
 func (h *Handler) workspaceUpdateDocument(c *gin.Context) {

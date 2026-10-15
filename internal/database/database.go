@@ -6,17 +6,33 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
+	"voex-server/internal/config"
+
 	driver "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-	"strings"
-	"time"
-	"voex-server/internal/config"
 )
 
 //go:embed schema.sql
 var schema string
+
+//go:embed recent-files.sql
+var recentFilesMigration string
+
+//go:embed document-details.sql
+var documentDetailsMigration string
+
+//go:embed trash.sql
+var trashMigration string
+
+//go:embed ai.sql
+var aiMigration string
+
+//go:embed ai-history.sql
+var aiHistoryMigration string
 
 func Open(settings config.Database) (*gorm.DB, error) {
 	cfg := driver.NewConfig()
@@ -120,6 +136,33 @@ func initialize(db *gorm.DB) error {
 		if versions != 3 {
 			return fmt.Errorf("required schema migrations incomplete")
 		}
+		var recentVersion int64
+		if err := c.Table("schema_migrations").Where("version=?", "004-recent-files").Count(&recentVersion).Error; err != nil {
+			return err
+		}
+		if recentVersion == 0 {
+			for _, statement := range strings.Split(recentFilesMigration, ";") {
+				if strings.TrimSpace(statement) == "" {
+					continue
+				}
+				if err := c.Exec(statement).Error; err != nil {
+					return err
+				}
+			}
+		}
+		if err := applyDocumentDetailsMigration(c); err != nil {
+			return err
+		}
+		if err := applyTrashMigration(c); err != nil {
+			return err
+		}
+		for _, statement := range strings.Split(aiMigration+"\n"+aiHistoryMigration, ";") {
+			if strings.TrimSpace(statement) != "" {
+				if err := c.Exec(statement).Error; err != nil {
+					return err
+				}
+			}
+		}
 		var records int64
 		if err := c.Table("workspace_state").Where("id=1").Count(&records).Error; err != nil {
 			return err
@@ -128,6 +171,10 @@ func initialize(db *gorm.DB) error {
 			return fmt.Errorf("workspace lock missing")
 		}
 		required := map[string][]string{"users": {"id", "account", "password_hash", "name", "avator", "email", "phone"}, "auth_sessions": {"id", "user_id", "refresh_hash", "expires_at"}, "teams": {"team_key", "team_code", "owner_id", "personal_owner_id", "privileges"}, "projects": {"project_key", "team_id", "creator_id", "privileges"}, "folders": {"folder_key", "project_id", "parent_id", "privileges"}, "documents": {"file_key", "folder_id", "creator_id", "revision", "privileges"}, "files": {"file_key", "hash", "creator_id", "privileges"}, "assets": {"directory", "storage_name", "mime"}, "file_shares": {"document_id", "token_hash", "permission", "revoked_at"}}
+		required["recent_files"] = []string{"user_id", "document_id", "share_id", "file_name", "viewed_at"}
+		required["documents"] = append(required["documents"], "updated_by", "updated_by_anonymous")
+		required["documents"] = append(required["documents"], "deleted_at", "deleted_by", "expires_at")
+		required["folders"] = append(required["folders"], "deleted_at", "deleted_by", "expires_at")
 		for table, columns := range required {
 			var rows []map[string]any
 			if err := c.Table(table).Select(columns).Where("1=0").Find(&rows).Error; err != nil {
@@ -136,4 +183,69 @@ func initialize(db *gorm.DB) error {
 		}
 		return nil
 	})
+}
+func applyDocumentDetailsMigration(db *gorm.DB) error {
+	const version = "005-document-details"
+	var applied int64
+	if err := db.Table("schema_migrations").Where("version=?", version).Count(&applied).Error; err != nil {
+		return err
+	}
+	if applied != 0 {
+		return nil
+	}
+	var columns int64
+	if err := db.Table("information_schema.COLUMNS").Where(
+		"TABLE_SCHEMA=DATABASE() AND TABLE_NAME='documents' AND COLUMN_NAME IN ?",
+		[]string{"updated_by", "updated_by_anonymous"},
+	).Count(&columns).Error; err != nil {
+		return err
+	}
+	// MySQL 8 applies this single ALTER atomically. Recover if the process stopped
+	// after that DDL committed but before its migration version was recorded.
+	if columns == 2 {
+		var constraints int64
+		if err := db.Table("information_schema.KEY_COLUMN_USAGE").Where(
+			"CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='documents' AND CONSTRAINT_NAME='fk_documents_updated_by' AND COLUMN_NAME='updated_by' AND REFERENCED_TABLE_NAME='users' AND REFERENCED_COLUMN_NAME='id'",
+		).Count(&constraints).Error; err != nil {
+			return err
+		}
+		if constraints != 1 {
+			return fmt.Errorf("document details migration has unexpected existing columns")
+		}
+		return db.Exec("INSERT IGNORE INTO schema_migrations (version) VALUES (?)", version).Error
+	}
+	if columns != 0 {
+		return fmt.Errorf("document details migration is incomplete")
+	}
+	for _, statement := range strings.Split(documentDetailsMigration, ";") {
+		if strings.TrimSpace(statement) != "" {
+			if err := db.Exec(statement).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// applyTrashMigration 执行尚未登记的回收站迁移。
+func applyTrashMigration(db *gorm.DB) error {
+	var applied int64
+	if err := db.Table("schema_migrations").
+		Where("version = ?", "006-trash").
+		Count(&applied).Error; err != nil {
+		return err
+	}
+	if applied != 0 {
+		return nil
+	}
+
+	for _, statement := range strings.Split(trashMigration, ";") {
+		if strings.TrimSpace(statement) == "" {
+			continue
+		}
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

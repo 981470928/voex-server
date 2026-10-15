@@ -4,9 +4,10 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"voex-server/internal/shared"
+
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"voex-server/internal/shared"
 )
 
 func Must(result *gorm.DB) *gorm.DB { shared.Must(result.Error); return result }

@@ -27,6 +27,9 @@ func Recovery() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if v := recover(); v != nil {
+				if v == http.ErrAbortHandler {
+					panic(v)
+				}
 				c.Abort()
 				if !c.Writer.Written() {
 					writeError(c, v)

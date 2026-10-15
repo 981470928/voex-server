@@ -130,12 +130,12 @@ func (s *Service) RenameProject(ctx context.Context, key, name string) {
 	})
 }
 
-func (s *Service) DeleteProject(ctx context.Context, key string) {
+func (s *Service) DeleteProject(ctx context.Context, key string, cascade bool) {
 	s.tx(ctx, true, func(db *gorm.DB) any {
 		project := workspaceFindProject(db, key)
 		s.RequireProject(db, ctx, key, "write")
-		if repository.WorkspaceProjectHasFolders(db, project["id"]) {
-			shared.Fail(409, "项目中仍有文件夹，请先清空")
+		if !cascade && repository.WorkspaceProjectHasFolders(db, project["id"]) {
+			shared.Fail(409, "项目中有子项，请确认连同所有子项一起删除")
 		}
 		repository.WorkspaceDeleteProject(db, project["id"])
 		return nil
@@ -180,15 +180,21 @@ func (s *Service) RenameFolder(ctx context.Context, key, name string) {
 	})
 }
 
-func (s *Service) DeleteFolder(ctx context.Context, key string) {
+func (s *Service) DeleteFolder(ctx context.Context, key string, cascade bool) {
 	s.tx(ctx, true, func(db *gorm.DB) any {
 		folder := workspaceFindFolder(db, key)
 		project := workspaceFolderProject(db, folder)
+
 		s.RequireProject(db, ctx, shared.String(project["project_key"]), "write")
-		if repository.WorkspaceFolderHasDocuments(db, folder["id"]) {
-			shared.Fail(409, "文件夹中仍有文件，请先清空")
+
+		if !cascade && repository.WorkspaceFolderHasChildren(
+			db, folder["project_id"], folder["id"],
+		) {
+			shared.Fail(409, "文件夹中有子项，请确认一并移入回收站")
 		}
-		repository.WorkspaceDeleteFolder(db, folder["id"])
+
+		userID := shared.String(identity.User(ctx)["id"])
+		repository.WorkspaceTrashFolder(db, folder["id"], userID)
 		return nil
 	})
 }
@@ -316,12 +322,15 @@ func (s *Service) CreateDocument(ctx context.Context, input CreateDocumentInput)
 	}).(shared.Row)
 }
 
-func (s *Service) GetDocument(ctx context.Context, key string) shared.Row {
-	return s.tx(ctx, false, func(db *gorm.DB) any {
+func (s *Service) GetDocument(ctx context.Context, key string, recordVisit bool) shared.Row {
+	return s.tx(ctx, recordVisit, func(db *gorm.DB) any {
 		row := s.FindDocument(db, ctx, key, "read", true)
 		result := DocumentDTO(row)
 		result["file_content"] = row["file_content"]
 		result["permissions"] = s.ProjectPermissions(db, ctx, shared.String(row["project_key"]))
+		if recordVisit {
+			repository.RecordRecentFile(db, shared.String(identity.User(ctx)["id"]), row)
+		}
 		return result
 	}).(shared.Row)
 }
@@ -367,7 +376,7 @@ func (s *Service) UpdateDocument(ctx context.Context, key string, input UpdateDo
 			}
 			next++
 		}
-		repository.WorkspaceUpdateDocument(db, shared.String(document["file_key"]), input.Changes, input.HasContent)
+		repository.WorkspaceUpdateDocument(db, shared.String(document["file_key"]), input.Changes, input.HasContent, shared.String(identity.User(ctx)["id"]))
 		return next
 	}).(int64)
 }
@@ -375,8 +384,9 @@ func (s *Service) UpdateDocument(ctx context.Context, key string, input UpdateDo
 func (s *Service) DeleteDocument(ctx context.Context, key string) {
 	s.tx(ctx, true, func(db *gorm.DB) any {
 		document := s.FindDocument(db, ctx, key, "write", false)
-		repository.WorkspaceDeleteDocument(db, document["id"], shared.String(document["file_key"]))
-		// Content-addressed blobs remain until a separate orphan sweep.
+		userID := shared.String(identity.User(ctx)["id"])
+
+		repository.WorkspaceTrashDocument(db, document["id"], userID)
 		return nil
 	})
 }

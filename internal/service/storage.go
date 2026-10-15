@@ -51,7 +51,7 @@ func (s *Service) AssetDownload(ctx context.Context, id string) filestore.Downlo
 	if asset == nil {
 		shared.Fail(404, "文件不存在")
 	}
-	return filestore.Download{Path: s.Files.AssetPath(shared.String(asset["directory"]), shared.String(asset["storage_name"])), Name: shared.String(asset["name"]), MIME: shared.String(asset["mime"]), Inline: shared.String(asset["mime"]) == "image/webp", SameOrigin: true, Cache: "private, no-store", Missing: "文件不存在"}
+	return filestore.Download{Key: s.Files.AssetKey(shared.String(asset["directory"]), shared.String(asset["storage_name"])), Name: shared.String(asset["name"]), MIME: shared.String(asset["mime"]), Inline: filestore.IsImageMIME(shared.String(asset["mime"])), SameOrigin: true, Cache: "private, no-store", Missing: "文件不存在"}
 }
 
 func (s *Service) UploadAttachment(ctx context.Context, upload filestore.Upload) shared.Row {
@@ -77,9 +77,11 @@ func (s *Service) UploadAttachment(ctx context.Context, upload filestore.Upload)
 	if name == "" || utf8.RuneCountInString(name) > 255 || len(mimeType) > 128 || !assetMimePattern.MatchString(mimeType) {
 		shared.Fail(400, "文件名或文件类型不合法")
 	}
+	// Network I/O must not hold the workspace's global write lock. A failed commit
+	// may leave a shared hash object, which is retained just like deleted attachments.
+	s.Files.SaveAttachment(ctx, upload, hash)
 	s.tx(ctx, true, func(db *gorm.DB) any {
 		s.FindDocument(db, ctx, fileKey, "write", false)
-		s.Files.SaveAttachment(upload, hash)
 		repository.CreateAttachment(db, shared.Row{"file_key": fileKey, "hash": hash, "name": name, "mime": mimeType, "size": upload.Size, "creator_id": user["id"], "privileges": `{"mode":"inherit"}`})
 		return nil
 	})
@@ -111,7 +113,7 @@ func (s *Service) findAttachment(db *gorm.DB, ctx context.Context, fileKey, hash
 func (s *Service) AttachmentDownload(ctx context.Context, rawKey, rawHash string) filestore.Download {
 	fileKey, hash := shared.Key(rawKey, "文档标识"), attachmentHash(rawHash)
 	file := s.tx(ctx, false, func(db *gorm.DB) any { return s.findAttachment(db, ctx, fileKey, hash, "read") }).(shared.Row)
-	return filestore.Download{Path: s.Files.AttachmentPath(hash), Name: shared.String(file["name"]), MIME: "application/octet-stream", Cache: "private, no-store", Missing: "附件文件不存在"}
+	return filestore.Download{Key: s.Files.AttachmentKey(hash), Name: shared.String(file["name"]), MIME: "application/octet-stream", Cache: "private, no-store", Missing: "附件文件不存在"}
 }
 
 func (s *Service) AttachmentProgress(ctx context.Context, rawKey, rawHash string) shared.Row {
@@ -125,7 +127,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, rawKey, rawHash string) 
 	s.tx(ctx, true, func(db *gorm.DB) any {
 		s.findAttachment(db, ctx, fileKey, hash, "write")
 		repository.DeleteAttachment(db, fileKey, hash)
-		// Reused content hashes stay on disk; a separate orphan sweep owns cleanup.
+		// Shared content hashes stay in R2; deleting a record must not remove them.
 		return nil
 	})
 }
