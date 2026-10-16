@@ -39,16 +39,17 @@ func (h *Handler) RegisterAIRoutes(protected *gin.RouterGroup) {
 	protected.GET("/ai/reviews/:id", func(c *gin.Context) {
 		c.JSON(http.StatusOK, h.Service.GetAIReview(c.Request.Context(), shared.Key(c.Param("id"), "审阅标识")))
 	})
-	protected.GET("/ai/conversations/:fileKey", func(c *gin.Context) {
-		var before uint64
-		if raw := c.Query("before"); raw != "" {
-			var err error
-			before, err = strconv.ParseUint(raw, 10, 64)
-			if err != nil || before == 0 {
-				shared.Fail(400, "历史游标格式不正确")
-			}
+	protected.GET("/ai/conversations/:fileKey/sessions", func(c *gin.Context) {
+		c.JSON(http.StatusOK, h.Service.ListAISessions(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), aiHistoryCursor(c)))
+	})
+	protected.PUT("/ai/conversations/:fileKey/sessions/:id", func(c *gin.Context) {
+		if c.Request.ContentLength != 0 && len(transport.Body(c)) != 0 {
+			shared.Fail(400, "新建会话不接受额外字段")
 		}
-		c.JSON(http.StatusOK, h.Service.AIConversation(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), before))
+		c.JSON(http.StatusOK, h.Service.CreateAISession(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), shared.Key(c.Param("id"), "会话标识")))
+	})
+	protected.GET("/ai/conversations/:fileKey", func(c *gin.Context) {
+		c.JSON(http.StatusOK, h.Service.AIConversation(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), c.Query("session_id"), aiHistoryCursor(c)))
 	})
 	protected.PUT("/ai/conversations/:fileKey/turns/:id", func(c *gin.Context) {
 		body := transport.Body(c)
@@ -56,7 +57,11 @@ func (h *Handler) RegisterAIRoutes(protected *gin.RouterGroup) {
 		if !ok {
 			shared.Fail(400, "请输入对话指令")
 		}
-		c.JSON(http.StatusOK, h.Service.BeginAITurn(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), shared.Key(c.Param("id"), "对话标识"), shared.Key(body["model_id"], "模型配置标识"), prompt))
+		session := ""
+		if value, ok := body["session_id"]; ok {
+			session = shared.Key(value, "会话标识")
+		}
+		c.JSON(http.StatusOK, h.Service.BeginAITurn(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), shared.Key(c.Param("id"), "对话标识"), session, shared.Key(body["model_id"], "模型配置标识"), prompt))
 	})
 	protected.PUT("/ai/conversations/:fileKey/turns/:id/response", func(c *gin.Context) {
 		data, err := json.Marshal(transport.Body(c))
@@ -67,4 +72,15 @@ func (h *Handler) RegisterAIRoutes(protected *gin.RouterGroup) {
 		}
 		c.JSON(http.StatusOK, h.Service.FinishAITurn(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), shared.Key(c.Param("id"), "对话标识"), input))
 	})
+}
+
+func aiHistoryCursor(c *gin.Context) uint64 {
+	if raw := c.Query("before"); raw != "" {
+		before, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || before == 0 {
+			shared.Fail(400, "历史游标格式不正确")
+		}
+		return before
+	}
+	return 0
 }

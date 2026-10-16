@@ -34,6 +34,9 @@ var aiMigration string
 //go:embed ai-history.sql
 var aiHistoryMigration string
 
+//go:embed ai-sessions.sql
+var aiSessionsMigration string
+
 func Open(settings config.Database) (*gorm.DB, error) {
 	cfg := driver.NewConfig()
 	cfg.Net = "tcp"
@@ -163,6 +166,9 @@ func initialize(db *gorm.DB) error {
 				}
 			}
 		}
+		if err := applyAISessionsMigration(c); err != nil {
+			return err
+		}
 		var records int64
 		if err := c.Table("workspace_state").Where("id=1").Count(&records).Error; err != nil {
 			return err
@@ -248,4 +254,47 @@ func applyTrashMigration(db *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+// applyAISessionsMigration preserves existing turns in one default session per user/document.
+// The schema lock and metadata checks allow restart after any committed DDL step.
+func applyAISessionsMigration(db *gorm.DB) error {
+	const version = "009-ai-conversation-sessions"
+	var applied int64
+	if err := db.Table("schema_migrations").Where("version=?", version).Count(&applied).Error; err != nil {
+		return err
+	}
+	if applied != 0 {
+		return nil
+	}
+	if err := db.Exec(aiSessionsMigration).Error; err != nil {
+		return err
+	}
+	var columns int64
+	if err := db.Table("information_schema.COLUMNS").Where("TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ai_conversation_turns' AND COLUMN_NAME='session_id'").Count(&columns).Error; err != nil {
+		return err
+	}
+	if columns == 0 {
+		if err := db.Exec(`ALTER TABLE ai_conversation_turns
+			ADD COLUMN session_id varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'default' AFTER document_id,
+			ADD KEY idx_ai_session_turns (user_id, document_id, session_id, id)`).Error; err != nil {
+			return err
+		}
+	}
+	if err := db.Exec(`INSERT IGNORE INTO ai_conversation_sessions (user_id, document_id, session_id, title, created_at, updated_at)
+		SELECT user_id, document_id, session_id, '历史对话', MIN(created_at), MAX(COALESCE(completed_at, created_at))
+		FROM ai_conversation_turns GROUP BY user_id, document_id, session_id`).Error; err != nil {
+		return err
+	}
+	var constraints int64
+	if err := db.Table("information_schema.KEY_COLUMN_USAGE").Where("CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='ai_conversation_turns' AND CONSTRAINT_NAME='fk_ai_turn_session'").Count(&constraints).Error; err != nil {
+		return err
+	}
+	if constraints == 0 {
+		if err := db.Exec(`ALTER TABLE ai_conversation_turns ADD CONSTRAINT fk_ai_turn_session
+			FOREIGN KEY (user_id, document_id, session_id) REFERENCES ai_conversation_sessions (user_id, document_id, session_id) ON DELETE CASCADE`).Error; err != nil {
+			return err
+		}
+	}
+	return db.Exec("INSERT IGNORE INTO schema_migrations (version) VALUES (?)", version).Error
 }

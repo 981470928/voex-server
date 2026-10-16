@@ -15,6 +15,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const defaultAISession = "default"
+
 var aiHistoryID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 type AIReviewInput struct {
@@ -63,10 +65,20 @@ func aiTurnMessages(row shared.Row) []shared.Row {
 	return []shared.Row{user, assistant}
 }
 
-func (s *Service) AIConversation(ctx context.Context, fileKey string, before uint64) shared.Row {
+func (s *Service) AIConversation(ctx context.Context, fileKey, session string, before uint64) shared.Row {
+	if session != "" && !aiHistoryID.MatchString(session) {
+		shared.Fail(400, "会话标识格式不正确")
+	}
 	return s.tx(ctx, false, func(db *gorm.DB) any {
 		document := s.FindDocument(db, ctx, fileKey, "read", false)
-		rows := repository.AIConversation(db, shared.String(identity.User(ctx)["id"]), document["id"], before, 21)
+		user := shared.String(identity.User(ctx)["id"])
+		if session != "" && repository.AISession(db, user, document["id"], session) == nil {
+			shared.Fail(404, "会话不存在")
+		}
+		if session == "" {
+			session = defaultAISession
+		}
+		rows := repository.AIConversation(db, user, document["id"], session, before, 21)
 		next := ""
 		if len(rows) > 20 {
 			rows = rows[:20]
@@ -80,9 +92,12 @@ func (s *Service) AIConversation(ctx context.Context, fileKey string, before uin
 	}).(shared.Row)
 }
 
-func (s *Service) BeginAITurn(ctx context.Context, fileKey, id, model, prompt string) []shared.Row {
+func (s *Service) BeginAITurn(ctx context.Context, fileKey, id, session, model, prompt string) []shared.Row {
 	if !aiHistoryID.MatchString(id) {
 		shared.Fail(400, "对话标识格式不正确")
+	}
+	if session != "" && !aiHistoryID.MatchString(session) {
+		shared.Fail(400, "会话标识格式不正确")
 	}
 	if strings.TrimSpace(prompt) == "" || len(prompt) > 64*1024 {
 		shared.Fail(400, "指令不能为空或超过 64 KiB")
@@ -90,8 +105,12 @@ func (s *Service) BeginAITurn(ctx context.Context, fileKey, id, model, prompt st
 	return s.tx(ctx, true, func(db *gorm.DB) any {
 		user := shared.String(identity.User(ctx)["id"])
 		document := s.FindDocument(db, ctx, fileKey, "read", false)
+		legacy := session == ""
+		if legacy {
+			session = defaultAISession
+		}
 		if row := repository.AITurn(db, user, id); row != nil {
-			if row["source_key"] != fileKey || row["model_id"] != model || row["prompt"] != prompt {
+			if row["source_key"] != fileKey || row["session_id"] != session || row["model_id"] != model || row["prompt"] != prompt {
 				shared.Fail(409, "该对话标识已用于另一条指令")
 			}
 			return aiTurnMessages(row)
@@ -99,9 +118,60 @@ func (s *Service) BeginAITurn(ctx context.Context, fileKey, id, model, prompt st
 		if repository.AIModel(db, user, model) == nil {
 			shared.Fail(404, "模型配置不存在")
 		}
-		repository.InsertAITurn(db, user, id, document["id"], model, prompt)
+		if repository.AISession(db, user, document["id"], session) == nil {
+			if !legacy {
+				shared.Fail(404, "会话不存在")
+			}
+			repository.InsertAISession(db, user, document["id"], session, "新对话")
+		}
+		title := ""
+		if !repository.AISessionHasTurns(db, user, document["id"], session) {
+			characters := []rune(strings.Join(strings.Fields(prompt), " "))
+			if len(characters) > 40 {
+				characters = characters[:40]
+			}
+			title = string(characters)
+		}
+		repository.InsertAITurn(db, user, id, document["id"], session, model, prompt)
+		repository.TouchAISession(db, user, document["id"], session, title)
 		return aiTurnMessages(repository.AITurn(db, user, id))
 	}).([]shared.Row)
+}
+
+func aiSessionSummary(row shared.Row) shared.Row {
+	return shared.Row{"id": row["session_id"], "title": row["title"], "createdAt": aiMilliseconds(row["created_at"]), "updatedAt": aiMilliseconds(row["updated_at"])}
+}
+
+func (s *Service) ListAISessions(ctx context.Context, fileKey string, before uint64) shared.Row {
+	return s.tx(ctx, false, func(db *gorm.DB) any {
+		document := s.FindDocument(db, ctx, fileKey, "read", false)
+		rows := repository.AISessions(db, shared.String(identity.User(ctx)["id"]), document["id"], before, 21)
+		next := ""
+		if len(rows) > 20 {
+			rows = rows[:20]
+			next = shared.String(rows[len(rows)-1]["id"])
+		}
+		sessions := make([]shared.Row, 0, len(rows))
+		for _, row := range rows {
+			sessions = append(sessions, aiSessionSummary(row))
+		}
+		return shared.Row{"sessions": sessions, "nextCursor": next}
+	}).(shared.Row)
+}
+
+func (s *Service) CreateAISession(ctx context.Context, fileKey, id string) shared.Row {
+	if !aiHistoryID.MatchString(id) {
+		shared.Fail(400, "会话标识格式不正确")
+	}
+	return s.tx(ctx, true, func(db *gorm.DB) any {
+		user := shared.String(identity.User(ctx)["id"])
+		document := s.FindDocument(db, ctx, fileKey, "read", false)
+		if row := repository.AISession(db, user, document["id"], id); row != nil {
+			return aiSessionSummary(row)
+		}
+		repository.InsertAISession(db, user, document["id"], id, "新对话")
+		return aiSessionSummary(repository.AISession(db, user, document["id"], id))
+	}).(shared.Row)
 }
 
 func validateAIReview(review *AIReviewInput, fileKey string) {
@@ -192,6 +262,7 @@ func (s *Service) FinishAITurn(ctx context.Context, fileKey, id string, input AI
 			values["review_json"] = string(snapshot)
 		}
 		repository.FinishAITurn(db, user, id, values)
+		repository.TouchAISession(db, user, document["id"], shared.String(row["session_id"]), "")
 		return aiTurnMessages(repository.AITurn(db, user, id))
 	}).([]shared.Row)
 }

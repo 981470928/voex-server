@@ -1,6 +1,6 @@
 # AI 模型配置与文档审阅
 
-所有接口沿用 `/api` 前缀与现有账号认证。配置、对话按登录用户隔离；文档操作继续使用项目权限。迁移 `internal/database/ai.sql` 与 `internal/database/ai-history.sql` 由启动时的 schema 初始化锁执行，新建模型、应用记录与对话历史表，不修改已有文档正文。
+所有接口沿用 `/api` 前缀与现有账号认证。配置、对话按登录用户隔离；文档操作继续使用项目权限。迁移 `internal/database/ai.sql`、`internal/database/ai-history.sql` 与 `internal/database/ai-sessions.sql` 由启动时的 schema 初始化锁执行，新建模型、应用记录与对话历史表，不修改已有文档正文。
 
 ## 模型配置
 
@@ -11,7 +11,9 @@
 | DELETE | `/ai/models/:id` | 删除自己的配置 |
 | POST | `/ai/models/:id/chat` | 请求自己的配置对应的模型 |
 | POST | `/ai/reviews/:id/apply` | 原子应用一份审阅，id 使用该快照的 UUID |
-| GET | `/ai/conversations/:fileKey?before=...` | 按当前账号、文档读取最近 20 轮或游标之前的历史 |
+| GET | `/ai/conversations/:fileKey/sessions?before=...` | 按当前账号、文档读取最近 20 个会话 |
+| PUT | `/ai/conversations/:fileKey/sessions/:id` | 幂等新建会话，接受空请求体或 `{}` |
+| GET | `/ai/conversations/:fileKey?session_id=...&before=...` | 读取指定会话最近 20 轮或游标之前的历史 |
 | PUT | `/ai/conversations/:fileKey/turns/:id` | 保存一轮用户指令与未完成的助手消息 |
 | PUT | `/ai/conversations/:fileKey/turns/:id/response` | 一次保存完成的回复及独立审阅快照 |
 | GET | `/ai/reviews/:id` | 读取当前账号可访问的完整快照及真实应用状态 |
@@ -51,11 +53,19 @@ Chat 请求接受 `messages`、`tools` 及 Claude 的 `system`。模型 ID、鉴
 
 ## 对话与快照持久化
 
-`ai_conversation_turns` 的一行代表一轮用户指令和助手回复。唯一键为 `(user_id, turn_id)`；源文档通过 `document_id` 关联。完成回复后 `finish_hash` 锁定回复、活动记录、错误和快照内容，相同请求可重试，不同请求返回 409。`(user_id, review_id)` 唯一，不能将同一个审阅绑定到另一条回复。
+一个账号在同一文档下可以保存多个独立会话。`ai_conversation_sessions` 用 `(user_id, document_id, session_id)` 唯一标识会话，`ai_conversation_turns` 的每轮记录通过相同字段关联；彻底删除账号或文档时同时级联清理会话。
 
-开始一轮请求：`{"model_id":"配置 ID","prompt":"用户指令"}`。客户端生成并保留该轮 UUID；相同 ID 和指令重试返回原记录，不追加重复消息。开始时验证用户具有源文档读取权限，且配置属于自己。指令最多 64 KiB。
+会话列表返回 `{"sessions":[{"id":"会话 UUID","title":"新对话","createdAt":1720000000000,"updatedAt":1720000000000}],"nextCursor":"..."}`。时间为 Unix 毫秒。每页 20 条，按不可变的创建序号倒序排列；后续发送消息更新 updatedAt，但不改变会话列表排序或分页边界。nextCursor 非空时作为下一页的 before，空字符串表示没有更早会话。无历史的文档返回空列表，读取不会自动创建会话。
 
-完成请求：`{"text":"回复","activity":["操作记录"],"error":"","review":{"id":"快照 UUID","changes":[...]}}`。没有修改时省略 review。回复最多 512 KiB，错误最多 16 KiB，活动最多 240 条且每条最多 1 KiB；快照仍受单文档 1 MiB 与请求总计 2 MiB 的限制。可以保存已经过期的建议供用户查看，但应用时仍会检查旧版本。客户端传入的 status 不作为应用状态来源。
+新建接口的 id 由客户端生成并在重试时保留，只接受 1–64 位英文字母、数字、下划线或连字符；同一账号、文档、id 重试返回原会话，不清空消息或改写标题。默认标题为“新对话”。会话第一条指令保存时会折叠空白为单空格，并取前 40 个 Unicode 字符作为标题；后续指令不改名。新建和列表都校验源文档读取权限。
+
+009 迁移将已有的每组账号、文档历史归入 id 为 `default`、标题为“历史对话”的会话，保留每轮消息、时间、快照及应用状态。没有历史的文档不创建默认会话。旧客户端省略 session_id 时读取或写入 default；首次旧客户端写入时按需创建默认会话。显式指定不存在的会话返回 404，不能将其他会话的轮次迁入当前会话。
+
+`ai_conversation_turns` 的一行代表一轮用户指令和助手回复。唯一键仍为 `(user_id, turn_id)`；源文档通过 `document_id` 关联。完成回复后 `finish_hash` 锁定回复、活动记录、错误和快照内容，相同请求可重试，不同请求返回 409。`(user_id, review_id)` 唯一，不能将同一个审阅绑定到另一条回复。
+
+开始一轮请求：`{"session_id":"会话 UUID","model_id":"配置 ID","prompt":"用户指令"}`。客户端生成并保留该轮 UUID；相同 ID、会话、模型和指令重试返回原记录，不追加重复消息；同一个 turn ID 换会话返回 409。开始时验证用户具有源文档读取权限，且配置属于自己。指令最多 64 KiB。
+
+完成请求无需 session_id，由账号和 URL 中的 turn ID 定位原会话，不能变更归属。请求：`{"text":"回复","activity":["操作记录"],"error":"","review":{"id":"快照 UUID","changes":[...]}}`。没有修改时省略 review。回复最多 512 KiB，错误最多 16 KiB，活动最多 240 条且每条最多 1 KiB；快照仍受单文档 1 MiB 与请求总计 2 MiB 的限制。可以保存已经过期的建议供用户查看，但应用时仍会检查旧版本。客户端传入的 status 不作为应用状态来源。
 
 两个写接口都返回该轮的 `[userMessage, assistantMessage]`。消息包含 `id`、`turnId`、`sequence`、`role`、`text`、`createdAt`；助手还包含 `state: incomplete | complete`、`activity`、`error` 和可选审阅摘要。摘要只有 `id`、`createdAt`、`status`、`fileCount`，不在历史列表中传输整份文档。GET review 按需返回相同摘要及 `changes`。
 
