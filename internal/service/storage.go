@@ -77,7 +77,7 @@ func (s *Service) UploadAttachment(ctx context.Context, upload filestore.Upload)
 	if name == "" || utf8.RuneCountInString(name) > 255 || len(mimeType) > 128 || !assetMimePattern.MatchString(mimeType) {
 		shared.Fail(400, "文件名或文件类型不合法")
 	}
-	// Network I/O must not hold the workspace's global write lock. A failed commit
+	// File I/O must not hold the workspace's global write lock. A failed commit
 	// may leave a shared hash object, which is retained just like deleted attachments.
 	s.Files.SaveAttachment(ctx, upload, hash)
 	s.tx(ctx, true, func(db *gorm.DB) any {
@@ -127,7 +127,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, rawKey, rawHash string) 
 	s.tx(ctx, true, func(db *gorm.DB) any {
 		s.findAttachment(db, ctx, fileKey, hash, "write")
 		repository.DeleteAttachment(db, fileKey, hash)
-		// Shared content hashes stay in R2; deleting a record must not remove them.
+		// Shared content hashes stay in local storage; deleting a record must not remove them.
 		return nil
 	})
 }

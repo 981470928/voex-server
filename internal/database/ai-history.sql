@@ -20,5 +20,3 @@ CREATE TABLE IF NOT EXISTS ai_conversation_turns (
   CONSTRAINT fk_ai_turn_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   CONSTRAINT fk_ai_turn_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-INSERT IGNORE INTO schema_migrations (version) VALUES ('008-ai-conversation-history');

@@ -11,8 +11,12 @@ POST /auth/refresh with HttpOnly voex_refresh cookie -> same session
 POST /auth/logout with refresh cookie or Bearer access token -> {success:true}
 GET /auth/me -> {id,account,name,avator,email,phone}
 PATCH /auth/me {name?,email?,phone?,avator?} -> user
+GET/HEAD /auth/me/config -> {userConfig:{...}}
+PATCH /auth/me/config {userConfig:{...}} -> {userConfig:{...}} (non-empty object; shallow assign)
 POST /assets/upload multipart file,path -> {id,name,url,path,size,mime,creator}
 GET /assets/:id -> owned asset, or a current teammate's active avatar; cookie/Bearer required
+
+User configuration: [USER-CONFIG-API.md](USER-CONFIG-API.md). Its schema belongs to the frontend; supplied top-level keys overwrite existing values, omitted keys remain, and nested objects are replaced as a whole. Null is stored rather than deleting a key.
 
 Accounts: 8-64 Unicode codepoints, exact bytes, no trimming or case folding.
 Passwords: 10-128 Unicode codepoints, Argon2id (19456 KiB, t=2, p=1).
@@ -21,7 +25,6 @@ JWT: HS256, fixed issuer/audience, 15 minutes. /home/server/.secrets/jwt-key is 
 Refresh: random 32 bytes, database stores SHA256, fixed 14 days, revocable, no rotation.
 Every request validates database session as well as JWT; logout revokes immediately.
 Cookie: HttpOnly, SameSite=Strict, Secure on HTTPS; current listener is HTTP only.
-AUTH_ALLOWED_ORIGINS can override trusted origins (comma separated).
 
 Project/document/attachment access follows team and project permissions described in TEAM-API.md. Creator name/avator reflect the current profile.
 

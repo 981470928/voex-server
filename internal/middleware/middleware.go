@@ -72,18 +72,7 @@ func Authentication(s *service.Service, optional bool) gin.HandlerFunc {
 		c.Next()
 	}
 }
-func RequestPolicy(allowed []string) gin.HandlerFunc {
-	origins := map[string]bool{}
-	for _, origin := range allowed {
-		origins[strings.TrimSpace(origin)] = true
-	}
-	trusted := func(r *http.Request, origin string) bool {
-		scheme := "http"
-		if security.SecureRequest(r) {
-			scheme = "https"
-		}
-		return origin == scheme+"://"+r.Host || origins[origin]
-	}
+func RequestPolicy() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		r := c.Request
 		w := c.Writer
@@ -93,7 +82,7 @@ func RequestPolicy(allowed []string) gin.HandlerFunc {
 		}
 		origin := r.Header.Get("Origin")
 		w.Header().Add("Vary", "Origin")
-		if origin != "" && trusted(r, origin) {
+		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
@@ -103,11 +92,6 @@ func RequestPolicy(allowed []string) gin.HandlerFunc {
 			w.Header().Add("Vary", "Access-Control-Request-Headers")
 			c.AbortWithStatus(204)
 			return
-		}
-		if r.Method != "GET" && r.Method != "HEAD" {
-			if (origin != "" && !trusted(r, origin)) || (origin == "" && r.Header.Get("Sec-Fetch-Site") == "cross-site") {
-				shared.Fail(403, "请求来源不受信任")
-			}
 		}
 		c.Next()
 	}

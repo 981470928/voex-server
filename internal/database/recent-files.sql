@@ -12,5 +12,3 @@ CREATE TABLE IF NOT EXISTS `recent_files` (
   CONSTRAINT `fk_recent_files_document` FOREIGN KEY (`document_id`) REFERENCES `documents` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_recent_files_share` FOREIGN KEY (`share_id`) REFERENCES `file_shares` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-INSERT IGNORE INTO schema_migrations (version) VALUES ('004-recent-files');

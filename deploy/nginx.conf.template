@@ -1,0 +1,57 @@
+server {
+    listen 80;
+    server_name _;
+    client_max_body_size 201m;
+    resolver 127.0.0.11 valid=5s ipv6=off;
+    set $api http://api:8090;
+    set $updater http://updater:9090;
+    location = / { return 302 /app/; }
+    location = /app { return 308 /app/; }
+    location /app/ {
+        root /srv/voex/current;
+        try_files $uri $uri/ /app/index.html;
+        add_header Cache-Control "no-cache";
+    }
+    location ^~ /app/assets/ {
+        alias /srv/voex/assets/;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+    location ^~ /api/upgrade-status/ {
+        proxy_pass $updater;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+        proxy_read_timeout 15s;
+        add_header Cache-Control "no-store" always;
+    }
+    location = /api/system/packages {
+        if (-f ${VOEX_DEPLOY_DIR}/state/maintenance) { return 503; }
+        client_max_body_size 2049m;
+        client_body_timeout 1800s;
+        proxy_request_buffering off;
+        proxy_pass $api;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1800s;
+        proxy_send_timeout 1800s;
+    }
+    location ^~ /api/health/ {
+        proxy_pass $api;
+        proxy_set_header Host $http_host;
+    }
+    location /api/ {
+        if (-f ${VOEX_DEPLOY_DIR}/state/maintenance) { return 503; }
+        proxy_pass $api;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_request_buffering off;
+    }
+    error_page 503 @maintenance;
+    location @maintenance {
+        default_type application/json;
+        add_header Retry-After 10 always;
+        return 503 '{"error":"系统正在维护，请保留未保存内容，稍后重试"}';
+    }
+}

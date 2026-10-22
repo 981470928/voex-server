@@ -34,6 +34,10 @@ func Run() (err error) {
 	log.SetOutput(os.Stderr)
 	// 读取环境配置，得到监听地址、数据库、存储和密钥文件等设置。
 	cfg := config.Read()
+	readTimeout, err := time.ParseDuration(config.Env("VOEX_HTTP_READ_TIMEOUT", "2m"))
+	if err != nil || readTimeout <= 0 {
+		return fmt.Errorf("VOEX_HTTP_READ_TIMEOUT must be a positive duration such as 2m or 30m")
+	}
 	// 使用存储配置创建文件存储；:= 声明 files，并复用命名返回值 err。
 	files, err := filestore.New(cfg.Storage)
 	// 存储初始化返回非 nil 错误时，终止启动。
@@ -43,12 +47,12 @@ func Run() (err error) {
 	}
 	// Run 退出时清理存储的进程临时目录；Close 仅删除空目录。
 	defer files.Close()
-	// 使用数据库配置建立 GORM 连接并初始化表结构；复用 err 保存错误。
+	// 仅连接并验证现有 schema；结构变更必须由独立 migrate 命令执行。
 	db, err := database.Open(cfg.Database)
 	// 数据库初始化失败时，终止启动；此前注册的 defer 仍会执行。
 	if err != nil {
-		// 返回包含原始错误类型的说明；%T 不保留原始错误内容或错误链。
-		return fmt.Errorf("database initialization failed (%T)", err)
+		// 保留数据库兼容性与连接错误，便于独立迁移和部署诊断。
+		return fmt.Errorf("database initialization failed: %w", err)
 	}
 	// 从 GORM 获取底层的 *sql.DB 连接池，供退出时统一关闭。
 	pool, err := db.DB()
@@ -67,16 +71,16 @@ func Run() (err error) {
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
-		business.RunTrashCleanup(cleanupCtx)
+		runTrashCleanup(cleanupCtx, business, config.Env("VOEX_MAINTENANCE_FILE", ""))
 	}()
 	defer func() {
 		cancelCleanup()
 		<-cleanupDone
 	}()
-	// 创建路由并传入业务服务和允许的来源列表 cfg.Origins。
+	// 创建路由并传入业务服务。
 	// log.New 创建写入标准输出的访问日志记录器，空字符串表示不添加自定义前缀。
 	// 按位或运算 | 合并日志选项：LstdFlags 添加日期和时间，LUTC 使用 UTC 时区。
-	routes := router.New(business, cfg.Origins, log.New(os.Stdout, "", log.LstdFlags|log.LUTC))
+	routes := router.New(business, log.New(os.Stdout, "", log.LstdFlags|log.LUTC))
 	// 构造 HTTP 服务器并通过 & 取得指针；此时尚未开始监听端口。
 	server := &http.Server{
 		// 使用配置中的主机和端口作为监听地址。
@@ -85,8 +89,8 @@ func Run() (err error) {
 		Handler: routes,
 		// 将 10 乘以秒单位，限制读取请求头的时间为 10 秒。
 		ReadHeaderTimeout: 10 * time.Second,
-		// 将 2 乘以分钟单位，限制读取整个请求（含请求体）的时间为 2 分钟。
-		ReadTimeout: 2 * time.Minute,
+		// 限制整个请求读取时间，默认 2 分钟；离线上传部署可显式设置 30m。
+		ReadTimeout: readTimeout,
 		// 将 60 乘以秒单位，限制长连接等待下一个请求的空闲时间为 60 秒。
 		IdleTimeout: 60 * time.Second,
 		// 将 1 左移 20 位得到 1,048,576，设置请求头上限为 1 MiB（含请求行）。
@@ -140,4 +144,53 @@ func Run() (err error) {
 	log.Print("[Server] HTTP listener closed")
 	// 信号触发的关闭流程返回 nil；即使进入过强制关闭分支，也不返回关闭错误。
 	return nil
+}
+
+// runTrashCleanup gates only the background write worker. API readiness remains
+// available during maintenance. The updater stops the old API before migrating;
+// a newly started API sees the existing file and does not start cleanup until
+// the updater removes it after acceptance.
+func runTrashCleanup(ctx context.Context, business *service.Service, maintenanceFile string) {
+	if maintenanceFile == "" {
+		business.RunTrashCleanup(ctx)
+		return
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var workerCancel context.CancelFunc
+	var workerDone chan struct{}
+	stop := func() {
+		if workerCancel != nil {
+			workerCancel()
+			<-workerDone
+			workerCancel, workerDone = nil, nil
+		}
+	}
+	defer stop()
+	for {
+		// Unknown filesystem errors fail closed instead of enabling writes.
+		_, err := os.Stat(maintenanceFile)
+		allowed := os.IsNotExist(err)
+		if allowed && workerCancel == nil && ctx.Err() == nil {
+			workerCancel, workerDone = startTrashCleanup(ctx, business)
+		} else if !allowed {
+			stop()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// Return cancellation ownership to the maintenance gate, which joins the worker.
+func startTrashCleanup(ctx context.Context, business *service.Service) (context.CancelFunc, chan struct{}) {
+	workerCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		business.RunTrashCleanup(workerCtx)
+	}()
+	return cancel, done
 }

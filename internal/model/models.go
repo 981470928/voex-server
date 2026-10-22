@@ -181,6 +181,7 @@ type User struct {
 	Avator       string    `gorm:"column:avator" json:"-"`
 	Email        string    `gorm:"column:email" json:"-"`
 	Phone        string    `gorm:"column:phone" json:"-"`
+	UserConfig   string    `gorm:"column:user_config" json:"-"`
 	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime:false" json:"-"`
 	UpdatedAt    time.Time `gorm:"column:updated_at;autoUpdateTime:false" json:"-"`
 }

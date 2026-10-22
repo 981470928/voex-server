@@ -214,7 +214,7 @@ func WorkspaceUpdateDocument(db *gorm.DB, key string, changes shared.Row, increm
 
 func WorkspaceDeleteDocument(db *gorm.DB, id any, key string) {
 	Must(db.Table("files").Where("file_key=?", key).Delete(&map[string]any{}))
-	// Foreign keys cascade to file_shares and recent_files; shared blobs stay in R2.
+	// Foreign keys cascade to file_shares and recent_files; shared blobs stay in local storage.
 	Must(db.Table("documents").Where("id=?", id).Delete(&map[string]any{}))
 }
 

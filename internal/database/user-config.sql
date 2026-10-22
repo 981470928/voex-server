@@ -1,0 +1,2 @@
+ALTER TABLE users
+    ADD COLUMN user_config JSON NOT NULL DEFAULT (JSON_OBJECT());

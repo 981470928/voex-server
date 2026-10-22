@@ -1,9 +1,7 @@
-// Package database configures GORM and applies the explicit bootstrap schema.
+// Package database opens MySQL connections without changing the schema.
 package database
 
 import (
-	"context"
-	_ "embed"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,68 +14,41 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-//go:embed schema.sql
-var schema string
-
-//go:embed recent-files.sql
-var recentFilesMigration string
-
-//go:embed document-details.sql
-var documentDetailsMigration string
-
-//go:embed trash.sql
-var trashMigration string
-
-//go:embed ai.sql
-var aiMigration string
-
-//go:embed ai-history.sql
-var aiHistoryMigration string
-
-//go:embed ai-sessions.sql
-var aiSessionsMigration string
-
-func Open(settings config.Database) (*gorm.DB, error) {
+func connection(settings config.Database, create bool) (*gorm.DB, error) {
 	cfg := driver.NewConfig()
 	cfg.Net = "tcp"
 	cfg.Addr = settings.Host + ":" + settings.Port
-	cfg.User = settings.User
-	cfg.Passwd = settings.Password
-	cfg.DBName = settings.Name
-	cfg.ParseTime = true
-	cfg.Loc = time.Local
-	cfg.Timeout = 10 * time.Second
-	cfg.ReadTimeout = 30 * time.Second
-	cfg.WriteTimeout = 30 * time.Second
+	cfg.User, cfg.Passwd, cfg.DBName = settings.User, settings.Password, settings.Name
+	cfg.ParseTime, cfg.Loc = true, time.Local
+	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = 10*time.Second, 30*time.Second, 30*time.Second
 	cfg.Collation = "utf8mb4_unicode_ci"
 	open := func(c *driver.Config) (*gorm.DB, error) {
-		return gorm.Open(mysql.Open(c.FormatDSN()), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent), SkipDefaultTransaction: true, DisableForeignKeyConstraintWhenMigrating: true})
+		return gorm.Open(mysql.Open(c.FormatDSN()), &gorm.Config{
+			Logger: logger.Default.LogMode(logger.Silent), SkipDefaultTransaction: true,
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
 	}
 	db, err := open(cfg)
-	if err != nil {
-		var d *driver.MySQLError
-		if !errors.As(err, &d) || d.Number != 1049 {
-			return nil, err
-		}
+	if err != nil && create && missingDatabase(err) {
 		bootstrap := *cfg
 		bootstrap.DBName = ""
 		admin, e := open(&bootstrap)
 		if e != nil {
 			return nil, e
 		}
-		sqlAdmin, e := admin.DB()
+		pool, e := admin.DB()
 		if e != nil {
 			return nil, e
 		}
 		e = admin.Exec("CREATE DATABASE IF NOT EXISTS `" + strings.ReplaceAll(cfg.DBName, "`", "``") + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci").Error
-		sqlAdmin.Close()
+		_ = pool.Close()
 		if e != nil {
 			return nil, e
 		}
 		db, err = open(cfg)
-		if err != nil {
-			return nil, err
-		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	pool, err := db.DB()
 	if err != nil {
@@ -86,215 +57,29 @@ func Open(settings config.Database) (*gorm.DB, error) {
 	pool.SetMaxOpenConns(10)
 	pool.SetMaxIdleConns(10)
 	pool.SetConnMaxLifetime(5 * time.Minute)
-	if err = initialize(db); err != nil {
-		pool.Close()
+	return db, nil
+}
+
+func missingDatabase(err error) bool {
+	var mysqlErr *driver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1049
+}
+
+// Open only connects and checks compatibility. Run the separate migrate command first.
+func Open(settings config.Database) (*gorm.DB, error) {
+	db, err := connection(settings, false)
+	if err != nil {
+		return nil, err
+	}
+	status, err := inspect(db)
+	if err == nil && !status.Compatible {
+		err = fmt.Errorf("schema incompatible: %s; run voex-server migrate before serve", status.Error)
+	}
+	if err != nil {
+		if pool, poolErr := db.DB(); poolErr == nil {
+			_ = pool.Close()
+		}
 		return nil, err
 	}
 	return db, nil
-}
-func initialize(db *gorm.DB) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	return db.WithContext(ctx).Connection(func(c *gorm.DB) error {
-		// Connection pins the physical connection; NewDB isolates each statement builder.
-		c = c.Session(&gorm.Session{NewDB: true})
-		var lock int
-		if err := c.Raw("SELECT GET_LOCK('voex-go-schema',30)").Scan(&lock).Error; err != nil {
-			return err
-		}
-		if lock != 1 {
-			return fmt.Errorf("schema lock unavailable")
-		}
-		defer func() {
-			release, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			c.WithContext(release).Exec("SELECT RELEASE_LOCK('voex-go-schema')")
-		}()
-		var tables int64
-		if err := c.Table("information_schema.TABLES").Where("TABLE_SCHEMA=DATABASE()").Count(&tables).Error; err != nil {
-			return err
-		}
-		if tables == 0 {
-			if err := c.Exec("SET FOREIGN_KEY_CHECKS=0").Error; err != nil {
-				return err
-			}
-			defer func() {
-				restore, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				c.WithContext(restore).Exec("SET FOREIGN_KEY_CHECKS=1")
-			}()
-			for _, statement := range strings.Split(schema, ";\n\n") {
-				if strings.TrimSpace(statement) == "" {
-					continue
-				}
-				if err := c.Exec(statement).Error; err != nil {
-					return err
-				}
-			}
-		}
-		var versions int64
-		if err := c.Table("schema_migrations").Where("version IN ?", []string{"001-workspace", "002-auth", "003-teams"}).Count(&versions).Error; err != nil {
-			return err
-		}
-		if versions != 3 {
-			return fmt.Errorf("required schema migrations incomplete")
-		}
-		var recentVersion int64
-		if err := c.Table("schema_migrations").Where("version=?", "004-recent-files").Count(&recentVersion).Error; err != nil {
-			return err
-		}
-		if recentVersion == 0 {
-			for _, statement := range strings.Split(recentFilesMigration, ";") {
-				if strings.TrimSpace(statement) == "" {
-					continue
-				}
-				if err := c.Exec(statement).Error; err != nil {
-					return err
-				}
-			}
-		}
-		if err := applyDocumentDetailsMigration(c); err != nil {
-			return err
-		}
-		if err := applyTrashMigration(c); err != nil {
-			return err
-		}
-		for _, statement := range strings.Split(aiMigration+"\n"+aiHistoryMigration, ";") {
-			if strings.TrimSpace(statement) != "" {
-				if err := c.Exec(statement).Error; err != nil {
-					return err
-				}
-			}
-		}
-		if err := applyAISessionsMigration(c); err != nil {
-			return err
-		}
-		var records int64
-		if err := c.Table("workspace_state").Where("id=1").Count(&records).Error; err != nil {
-			return err
-		}
-		if records != 1 {
-			return fmt.Errorf("workspace lock missing")
-		}
-		required := map[string][]string{"users": {"id", "account", "password_hash", "name", "avator", "email", "phone"}, "auth_sessions": {"id", "user_id", "refresh_hash", "expires_at"}, "teams": {"team_key", "team_code", "owner_id", "personal_owner_id", "privileges"}, "projects": {"project_key", "team_id", "creator_id", "privileges"}, "folders": {"folder_key", "project_id", "parent_id", "privileges"}, "documents": {"file_key", "folder_id", "creator_id", "revision", "privileges"}, "files": {"file_key", "hash", "creator_id", "privileges"}, "assets": {"directory", "storage_name", "mime"}, "file_shares": {"document_id", "token_hash", "permission", "revoked_at"}}
-		required["recent_files"] = []string{"user_id", "document_id", "share_id", "file_name", "viewed_at"}
-		required["documents"] = append(required["documents"], "updated_by", "updated_by_anonymous")
-		required["documents"] = append(required["documents"], "deleted_at", "deleted_by", "expires_at")
-		required["folders"] = append(required["folders"], "deleted_at", "deleted_by", "expires_at")
-		for table, columns := range required {
-			var rows []map[string]any
-			if err := c.Table(table).Select(columns).Where("1=0").Find(&rows).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-func applyDocumentDetailsMigration(db *gorm.DB) error {
-	const version = "005-document-details"
-	var applied int64
-	if err := db.Table("schema_migrations").Where("version=?", version).Count(&applied).Error; err != nil {
-		return err
-	}
-	if applied != 0 {
-		return nil
-	}
-	var columns int64
-	if err := db.Table("information_schema.COLUMNS").Where(
-		"TABLE_SCHEMA=DATABASE() AND TABLE_NAME='documents' AND COLUMN_NAME IN ?",
-		[]string{"updated_by", "updated_by_anonymous"},
-	).Count(&columns).Error; err != nil {
-		return err
-	}
-	// MySQL 8 applies this single ALTER atomically. Recover if the process stopped
-	// after that DDL committed but before its migration version was recorded.
-	if columns == 2 {
-		var constraints int64
-		if err := db.Table("information_schema.KEY_COLUMN_USAGE").Where(
-			"CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='documents' AND CONSTRAINT_NAME='fk_documents_updated_by' AND COLUMN_NAME='updated_by' AND REFERENCED_TABLE_NAME='users' AND REFERENCED_COLUMN_NAME='id'",
-		).Count(&constraints).Error; err != nil {
-			return err
-		}
-		if constraints != 1 {
-			return fmt.Errorf("document details migration has unexpected existing columns")
-		}
-		return db.Exec("INSERT IGNORE INTO schema_migrations (version) VALUES (?)", version).Error
-	}
-	if columns != 0 {
-		return fmt.Errorf("document details migration is incomplete")
-	}
-	for _, statement := range strings.Split(documentDetailsMigration, ";") {
-		if strings.TrimSpace(statement) != "" {
-			if err := db.Exec(statement).Error; err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// applyTrashMigration 执行尚未登记的回收站迁移。
-func applyTrashMigration(db *gorm.DB) error {
-	var applied int64
-	if err := db.Table("schema_migrations").
-		Where("version = ?", "006-trash").
-		Count(&applied).Error; err != nil {
-		return err
-	}
-	if applied != 0 {
-		return nil
-	}
-
-	for _, statement := range strings.Split(trashMigration, ";") {
-		if strings.TrimSpace(statement) == "" {
-			continue
-		}
-		if err := db.Exec(statement).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// applyAISessionsMigration preserves existing turns in one default session per user/document.
-// The schema lock and metadata checks allow restart after any committed DDL step.
-func applyAISessionsMigration(db *gorm.DB) error {
-	const version = "009-ai-conversation-sessions"
-	var applied int64
-	if err := db.Table("schema_migrations").Where("version=?", version).Count(&applied).Error; err != nil {
-		return err
-	}
-	if applied != 0 {
-		return nil
-	}
-	if err := db.Exec(aiSessionsMigration).Error; err != nil {
-		return err
-	}
-	var columns int64
-	if err := db.Table("information_schema.COLUMNS").Where("TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ai_conversation_turns' AND COLUMN_NAME='session_id'").Count(&columns).Error; err != nil {
-		return err
-	}
-	if columns == 0 {
-		if err := db.Exec(`ALTER TABLE ai_conversation_turns
-			ADD COLUMN session_id varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'default' AFTER document_id,
-			ADD KEY idx_ai_session_turns (user_id, document_id, session_id, id)`).Error; err != nil {
-			return err
-		}
-	}
-	if err := db.Exec(`INSERT IGNORE INTO ai_conversation_sessions (user_id, document_id, session_id, title, created_at, updated_at)
-		SELECT user_id, document_id, session_id, '历史对话', MIN(created_at), MAX(COALESCE(completed_at, created_at))
-		FROM ai_conversation_turns GROUP BY user_id, document_id, session_id`).Error; err != nil {
-		return err
-	}
-	var constraints int64
-	if err := db.Table("information_schema.KEY_COLUMN_USAGE").Where("CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='ai_conversation_turns' AND CONSTRAINT_NAME='fk_ai_turn_session'").Count(&constraints).Error; err != nil {
-		return err
-	}
-	if constraints == 0 {
-		if err := db.Exec(`ALTER TABLE ai_conversation_turns ADD CONSTRAINT fk_ai_turn_session
-			FOREIGN KEY (user_id, document_id, session_id) REFERENCES ai_conversation_sessions (user_id, document_id, session_id) ON DELETE CASCADE`).Error; err != nil {
-			return err
-		}
-	}
-	return db.Exec("INSERT IGNORE INTO schema_migrations (version) VALUES (?)", version).Error
 }

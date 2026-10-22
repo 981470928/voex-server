@@ -124,12 +124,6 @@ CREATE TABLE IF NOT EXISTS `projects` (
   CONSTRAINT `fk_projects_team` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS `schema_migrations` (
-  `version` varchar(64) NOT NULL,
-  `applied_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`version`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 CREATE TABLE IF NOT EXISTS `team_invites` (
   `id` char(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `team_id` int NOT NULL,
@@ -215,5 +209,3 @@ CREATE TABLE IF NOT EXISTS `workspace_state` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 INSERT IGNORE INTO workspace_state (id) VALUES (1);
-
-INSERT IGNORE INTO schema_migrations (version) VALUES ('001-workspace'),('002-auth'),('003-teams');

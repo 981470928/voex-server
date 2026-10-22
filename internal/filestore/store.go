@@ -92,9 +92,9 @@ func (s *Store) ReadUpload(w http.ResponseWriter, r *http.Request, asset bool) (
 			if name != "file" || upload.Path != "" {
 				shared.Fail(400, "上传字段或文件数量不合法")
 			}
-			file, err := os.CreateTemp(s.tempDir, "upload-")
+			file, filename, err := s.createUpload()
 			shared.Must(err)
-			upload.Path, upload.Name, upload.MIME = file.Name(), part.FileName(), part.Header.Get("Content-Type")
+			upload.Path, upload.Name, upload.MIME = filename, part.FileName(), part.Header.Get("Content-Type")
 			upload.Size, err = io.Copy(file, io.LimitReader(part, maximum+1))
 			closeErr := file.Close()
 			if err != nil {
@@ -269,7 +269,7 @@ func (a StoredAsset) Remove() {
 	}
 }
 
-// SaveAsset validates supported images and stores their original bytes in R2.
+// SaveAsset validates supported images and stores their original bytes in the private local volume.
 func (s *Store) SaveAsset(ctx context.Context, upload Upload, id, directory string) (stored StoredAsset) {
 	SafeDirectory(directory)
 	stored = StoredAsset{StorageName: id, MIME: "application/octet-stream", Size: upload.Size}

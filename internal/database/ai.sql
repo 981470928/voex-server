@@ -23,5 +23,3 @@ CREATE TABLE IF NOT EXISTS ai_review_applications (
   PRIMARY KEY (user_id, review_id),
   CONSTRAINT fk_ai_review_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-INSERT IGNORE INTO schema_migrations (version) VALUES ('007-ai-agent');

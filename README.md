@@ -1,101 +1,95 @@
 # voex-server
 
-Gin + GORM HTTP 服务：账号认证、团队与项目权限、单层目录、Markdown 文档、附件、资产图片与文件分享。默认监听 `127.0.0.1:8090`，API 前缀 `/api`。
+Gin + GORM HTTP 服务：账号认证、团队与项目权限、单层目录、Markdown 文档、附件、资产图片与文件分享。API 前缀 `/api`；独立二进制默认监听 `127.0.0.1:8090`。
 
-## 环境与运行
+当前文件后端为主机本地 `/home/static`。推荐通过已签名离线包部署；192 服务器验证环境使用独立 Compose 项目 `voex-local`、目录 `/home/voex-deploy`、HTTP 端口 `18080`，不替换旧 PM2 进程或旧 MySQL。初装、离线升级及恢复步骤见 [Docker 部署](docs/DOCKER.md)。
 
-- Go 1.27.1。服务器安装于 `/opt/go1.27.1`，`go` 和 `gofmt` 位于 `/usr/local/bin`。
-- Make（Linux 构建可用 `apt-get install --no-install-recommends make`）；图片校验使用 Go 标准库与 `golang.org/x/image/webp`，无需安装 libvips。
-- MySQL 8，初始表结构见 `internal/database/schema.sql`，最近文件与修改人迁移见 `internal/database/recent-files.sql`、`internal/database/document-details.sql`，连接配置见 `.env.example`。
-- Cloudflare R2 私有存储桶及该桶的 S3 API 读写凭据，配置方式见下方「存储配置」。
+## 源码环境与运行
+
+- Go 1.27.1，版本依赖固定在 `go.mod` / `go.sum`。服务器已安装的 `go` / `gofmt` 位于 `/usr/local/bin`。
+- Make、MySQL 8；图片校验使用 Go 标准库与 `golang.org/x/image/webp`，无需 libvips。
+- 服务用户须能读写专用绝对路径 `VOEX_STORAGE_ROOT`，默认 `/home/static`；目录不得通过符号链接逃逸到其他位置。
+- 原生 Go API 不依赖 Node.js；构建包含前端的离线发行包需要前端仓库、Node.js / pnpm、Docker / Compose，见 Docker 文档。
+
+以下命令仅用于已明确指定的开发数据库；新环境填写 `.env`，已有配置应保留。运行服务前必须单独执行迁移，`serve` 不建库、不执行 DDL。
 
 ```sh
 cd /home/voex-server
-# 仅新部署需要复制示例；已有 .env 时保留现有配置。
 cp -n .env.example .env
 chmod 600 .env
-# 填写 .env 中的 MySQL 和 R2 配置后再启动。
+# 编辑 .env，设置开发 MySQL、VOEX_STORAGE_ROOT 和 JWT_SECRET_FILE。
 make build
 make check
-./bin/voex-server
+./bin/voex-server schema
+./bin/voex-server migrate
+./bin/voex-server serve
 ```
 
-`.env` 自动加载，进程环境变量优先；`VOEX_ENV_FILE` 可指定其他配置文件。依赖固定在 `go.mod` 和 `go.sum`。默认模块代理不可达时使用：
+`schema` 输出兼容性 JSON，需要检查 `compatible` / `can_migrate` / `dirty`，不能只看进程退出码。已有业务库迁移前先停写并备份；不要将本例指向旧线上数据库。迁移记录、旧库 baseline 与 dirty 处理见 [数据库](docs/db.md)。
 
-```sh
-GOPROXY=https://goproxy.cn,direct go mod download
-```
-
-保持 Go checksum 校验。`make build` 通过临时文件构建并原子替换 `bin/voex-server`；`make fmt` 格式化 `cmd` 和 `internal`；`make check` 执行 `go vet` 和 `go mod verify`。
+`.env` 自动加载，进程环境变量优先；`VOEX_ENV_FILE` 可指定其他配置文件。默认模块代理不可达时可使用 `GOPROXY=https://goproxy.cn,direct go mod download`，保持 Go checksum 校验。`make build` 原子替换 `bin/voex-server`；`make fmt` 格式化 `cmd` 和 `internal`；`make check` 执行 `go vet` 与 `go mod verify`，不运行单元测试。
 
 ## 项目结构
 
-项目采用 Gin + GORM 分层实现，入口为 `cmd/voex-server/main.go`。
+| 目录                                                        | 职责                                                     |
+| ----------------------------------------------------------- | -------------------------------------------------------- |
+| `cmd/voex-server`                                           | `serve`、独立 `migrate` 与只读 `schema` 命令             |
+| `cmd/voex-updater`、`internal/updater`                      | 持久化离线发行包、备份、升级与失败恢复                   |
+| `cmd/voex-release`                                          | Ed25519 发行签名与校验工具                               |
+| `internal/app`、`internal/config`                           | 依赖组装、服务生命周期和环境配置                         |
+| `internal/router`、`internal/middleware`                    | Gin 路由、登录、CORS、日志、维护模式                     |
+| `internal/handler`、`internal/transport`                    | 参数解析、HTTP / JSON / Cookie 与升级代理                |
+| `internal/service`、`internal/repository`、`internal/model` | 业务规则、权限、事务及 GORM 数据访问                     |
+| `internal/database`                                         | 只读 schema 校验、显式版本化迁移与 checksum / dirty 记录 |
+| `internal/filestore`                                        | 本地不可变文件、私有暂存、原图校验与 Range 下载          |
+| `deploy`                                                    | 离线构建、Compose、安装脚本及 Nginx 配置                 |
+| `docs`                                                      | 架构、数据库、路由及 Docker 运维说明                     |
 
-| 目录 | 职责 |
-| --- | --- |
-| `internal/app`、`internal/config` | 依赖组装、服务生命周期和环境配置 |
-| `internal/router`、`internal/middleware` | Gin 路由组、登录、CORS、日志、错误恢复 |
-| `internal/handler`、`internal/transport` | 每条路由的简短中文注释、参数解析与响应 |
-| `internal/service` | 业务规则、权限、事务、版本冲突 |
-| `internal/repository`、`internal/model` | GORM 查询与数据模型 |
-| `internal/database` | MySQL 连接、嵌入 schema、受控初始化 |
-| `internal/identity`、`internal/security`、`internal/shared` | 用户上下文、安全与公共校验 |
-| `internal/filestore` | R2 对象存储、临时上传与图片处理、Range 下载 |
-| `docs` | 完整结构规划和路由速查 |
+依赖方向与事务规则见 [架构](docs/architecture.md)，端点见 [路由](docs/routes.md)，账号与团队接口见 `docs/AUTH-API.md` / `docs/TEAM-API.md`。模型不调用 `AutoMigrate`。
 
-完整依赖方向、扩展约定和事务策略见 [项目结构](docs/architecture.md)，全部端点见 [路由速查](docs/routes.md)。账号与资产约定见 `AUTH-API.md`，团队与分享约定见 `TEAM-API.md`，数据库见 `db.md`。
+## 本地文件存储
 
-Gin、GORM 及 MySQL 驱动版本固定在 `go.mod`；已有 Crypto/MySQL 底层依赖保持原版本。Service 不依赖 Gin 或 HTTP，数据库查询集中在 Repository。模型映射现有 schema，不调用 `AutoMigrate`。
-
-## 存储配置
-
-文件内容保存到 Cloudflare R2，MySQL 继续保存元数据和权限。使用 AWS SDK for Go v2 的 S3 API，region 固定为 `auto`；桶保持私有，现有 `/api/assets/...`、附件及分享下载均由后端完成权限校验和流式传输。此方式不需要开启桶公共访问或配置浏览器直传 CORS。
-
-1. 在 R2 管理界面创建 API token，选择 **Object Read & Write**，范围限定到 `voex-dev`。
-2. 将生成的 **Access Key ID**、**Secret Access Key** 填入本地 `.env`；不要使用普通 Cloudflare API token 替代 S3 密钥。
-3. 从桶设置复制 **S3 API endpoint**，按 `.env.example` 填写以下配置。受地域管辖的桶应使用控制台给出的对应 endpoint。
+只需配置本地存储根，不再配置 R2 凭据：
 
 ```dotenv
-R2_ENDPOINT=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
-R2_BUCKET=voex-dev
-R2_ACCESS_KEY_ID=YOUR_ACCESS_KEY_ID
-R2_SECRET_ACCESS_KEY=YOUR_SECRET_ACCESS_KEY
+VOEX_STORAGE_ROOT=/home/static
 ```
 
-`R2_ENDPOINT` 不包含桶名，不能填写 `r2.dev` 公共访问域名。四项配置均必填，缺失时启动会明确报错。凭据仅保存在被 Git 忽略的 `.env` 或进程环境中。参考 [R2 密钥配置](https://developers.cloudflare.com/r2/api/tokens/)和 [Go SDK 官方示例](https://developers.cloudflare.com/r2/examples/aws/aws-sdk-go/)。
+| 内容                   | 主机路径                                         |
+| ---------------------- | ------------------------------------------------ |
+| 文档附件               | `/home/static/attachments/{sha256}`              |
+| 普通资产、头像与缩略图 | `/home/static/assets/{directory}/{storage_name}` |
+| 每进程上传暂存         | `/home/static/.uploads/{process_uuid}/...`       |
 
-| 内容 | R2 object key |
-| --- | --- |
-| 文档附件 | `attachments/{sha256}` |
-| 普通资产 | `assets/{directory}/{uuid}` |
-| 原始头像、缩略图 | `assets/{directory}/{uuid}`，MIME 按实际图片格式保存 |
+文件内容在本地，MySQL 保存元数据、文档关联及权限。`local.go` 通过受限文件系统根和路径校验访问文件；上传完整写入并同步后以不覆盖的硬链接发布，附件仍按 hash 复用。未提交的 UUID 资产尝试删除；共享附件不随关联删除，避免影响其他文档，没有自动孤儿文件清理任务。异常退出遗留的 `.uploads` 文件不会被自动扫描删除，只能在确认没有进程使用后人工处理。
 
-头像与缩略图只接受可完整解码的静态 PNG、JPEG、WebP，保留 5 MiB / 20 MiB 和 2000 万像素限制；校验通过后原图上传 R2，不缩放、压缩、转码或移除 metadata。历史 `.webp` 对象继续可读，接口返回格式保持现有约定。下载支持 HEAD、单段/多段 Range、ETag 和条件请求；HEAD 只读取对象元数据。超过 16 段的 Range 请求按完整文件响应，避免一次请求触发大量 R2 读取。
+头像和缩略图只接受可完整解码的静态 PNG / JPEG / WebP，沿用 5 MiB / 20 MiB 与 2000 万像素限制；保存原始字节和实际 MIME，不自动转换 WebP。文件仍必须经过既有 API 鉴权，主机目录不映射为 Nginx 公共目录；HEAD、单段/多段 Range、ETag 与条件请求保留。超过 16 段 Range 按完整响应处理。
 
-- `VOEX_TEMP_DIR`：可选的可信绝对路径，默认系统临时目录。每个进程创建随机私有子目录 `voex-uploads-*`，仅存放上传和图片转换临时文件，请求结束后清理；自定义父目录应仅允许服务用户写入。异常退出留下的临时文件需在确认没有进程使用后手动清理。
-- `JWT_SECRET_FILE`：默认 `/home/server/.secrets/jwt-key`。保留密钥以维持现有登录会话。
-- 附件按内容哈希复用且禁止覆盖；删除关联记录或上传后的数据库提交失败时保留 R2 对象，避免影响其他文档。未提交的 UUID 资产会尝试删除，失败时记录日志；没有自动孤儿对象清理任务。
+本次不迁移历史 R2 文件、不回退读取 R2，也不删除远端桶或对象。旧数据库中已有的元数据不代表对应内容已经出现在本地：缺失本地文件按原下载接口返回不存在。需要历史内容时应另行制定迁移方案，不能把改配置当作迁移已完成。旧远端数据与旧环境继续保留，独立 Docker 环境不导入旧数据库。
 
-### 从本地存储切换
+`JWT_SECRET_FILE` 仍是登录签名密钥路径；原生运行默认 `/home/server/.secrets/jwt-key`，Docker 使用部署根下 `secrets/jwt-key`。保留密钥才能维持既有会话。`VOEX_TEMP_DIR`、R2 配置和旧 `/home/update` 不属于当前存储路径配置。
 
-`VOEX_STATIC_DIR`、`VOEX_UPLOAD_DIR` 已不再使用，程序不会自动迁移或回退读取本地旧文件。有历史数据时，应先在原服务器把 `/home/static/{sha256}` 上传为 `attachments/{sha256}`，把 `/home/update/{directory}/{storage_name}` 上传为 `assets/{directory}/{storage_name}`，排除 `.incoming` 临时目录，再切换服务。对象 key 必须与数据库中的 hash、directory、storage_name 对应，数据库无需改表。原目录及 JWT 密钥应保留以便回滚。
+## 离线安装与后台升级
 
-## 部署
-
-当前进程由服务器已有 PM2 管理，启动的是 Go 二进制，`interpreter` 为 `none`。项目的构建和业务运行不需要 Node.js、npm、pnpm 或 TypeScript。
+受信任构建主机生成 v2 发行包：
 
 ```sh
 cd /home/voex-server
-make build
-make check
-pm2 restart voex-server
-pm2 save
-pm2 describe voex-server
-curl -i http://127.0.0.1:8090/api/auth/me
+# 0.2.0 明确允许从应用版本 0.1.1 升级。
+./deploy/build-release.sh 0.2.0 0.1.1
 ```
 
-PM2 配置位于 `/home/ecosystem.config.js`，后端入口为 `bin/voex-server`。服务在 SIGINT/SIGTERM 后最多等待 25 秒完成请求，PM2 `kill_timeout` 为 30 秒。未登录时 `/api/auth/me` 返回 `401` JSON。
+输出为 `dist/voex-0.2.0-install.tar.gz` 与 `dist/voex-0.2.0-upgrade.tar.gz`。应用升级包必须且只能包含 `release.json`、`release.sig`、`images.tar`（仅 API 镜像）、`frontend.tar.gz`（前端 dist）。签名清单使用 `formatVersion: 2` 和 `frontendSHA256`，不再包含 `webImage` / `webImageID`。
+
+构建私钥 `.release-keys/signing.key` 只留在受信任构建主机，不进入包、镜像或部署环境。完整安装包额外包含 Compose、Nginx 配置、安装及转换脚本、公钥、验签工具和基础设施镜像（固定官方 Nginx、MySQL、updater），不含真实 `.env`。全新环境解包后执行 `./install.sh /home/voex-deploy 18080 0.0.0.0`，入口为 `http://192.140.173.58:18080/app/`。
+
+已有 v1 应用版本 0.1.1 必须先从受信任 v2 完整安装包中执行 `./migrate-frontend.sh /home/voex-deploy`。这次基础设施转换保留应用版本、数据库、密钥和账号，一次性重建 Web / updater / API，将旧发行包移入 `legacy-releases` 并保存 `infrastructure-backups`；转换不是应用升级。随后才在工作台导入 0.2.0 v2 升级包。详细前置条件及恢复方式见 [Docker 部署](docs/DOCKER.md)。
+
+工作台“系统升级”对所有已登录用户开放，不限管理员；服务端仍强制校验签名、公钥、API 镜像及前端归档摘要和来源版本。导入准备 `frontend/releases/{version}/app` 并追加不可变 hashed assets，不切换当前页面；确认升级后迁移数据库、重建 API，再原子切换 `frontend/current` 相对链接。固定官方 Nginx 只在完整安装或专门基础设施转换时配置，正常应用升级及回滚不重建 Nginx，也不自动升级 MySQL / updater。
+
+迁移或健康检查失败时还原备份中的前端版本、实际数据库快照、原环境与 API；恢复失败保持维护模式，更新器重启不会盲目重跑中断任务。业务 API 合同和页面控件不因包格式变化而增加。
+
+原 `/home/ecosystem.config.js` 与旧 PM2 后端属于保留环境，本次独立 Docker 安装不需要 `pm2 restart` 或覆盖旧二进制。直接运行新版二进制时同样必须先在目标数据库完成 `migrate`。
 
 ## 验证与备份
 
@@ -109,7 +103,7 @@ PM2 配置位于 `/home/ecosystem.config.js`，后端入口为 `bin/voex-server`
 
 本次框架改写已保留全部 54 个业务路由及 GET 对应的 HEAD 行为。验证覆盖团队/工作区 159 项、文件/分享/HEAD/Range 94 项、认证互通 45 项，以及现有数据只读对比和 HEAD 30 项；不执行单元测试。
 
-框架改写前的 Go 源码、二进制、环境配置和验证记录保存于 `.gin-backup-path` 指向的仓库外目录。需要紧急切回前一 Go 二进制时：
+框架改写前的 Go 源码、二进制、环境配置和验证记录保存于 `.gin-backup-path` 指向的仓库外目录。以下是旧 Gin/GORM 改写的历史回滚记录，不是当前 Docker 升级流程。旧二进制必须与恢复后的 schema 匹配；不能用只切换镜像或二进制的方式撤销已提交的 MySQL DDL。核对数据库版本及备份后，历史 PM2 环境的二进制切回方式为：
 
 ```sh
 cd /home/voex-server

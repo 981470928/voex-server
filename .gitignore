@@ -7,3 +7,8 @@ logs/
 .go-backup-path
 
 .gin-backup-path
+
+# Docker release artifacts and signing secrets
+/deploy/artifacts/
+/dist/
+/.release-keys/

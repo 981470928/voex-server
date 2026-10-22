@@ -25,6 +25,10 @@ func (h *Handler) RegisterAuthRoutes(public, protected *gin.RouterGroup) {
 	protected.Match([]string{"GET", "HEAD"}, "/auth/me", h.me)
 	// PATCH /api/auth/me：修改当前用户资料与头像，需要登录。
 	protected.PATCH("/auth/me", h.updateProfile)
+	// GET/HEAD /api/auth/me/config：读取当前用户的前端自定义配置。
+	protected.Match([]string{"GET", "HEAD"}, "/auth/me/config", h.userConfig)
+	// PATCH /api/auth/me/config：浅合并当前用户配置，新增和修改共用此接口。
+	protected.PATCH("/auth/me/config", h.updateUserConfig)
 }
 func (h *Handler) writeSession(c *gin.Context, status int, s service.Session) {
 	if s.RefreshToken != "" {
@@ -75,4 +79,10 @@ func (h *Handler) logout(c *gin.Context) {
 func (h *Handler) me(c *gin.Context) { c.JSON(200, identity.User(c.Request.Context())) }
 func (h *Handler) updateProfile(c *gin.Context) {
 	c.JSON(200, h.Service.UpdateProfile(c.Request.Context(), transport.Body(c)))
+}
+func (h *Handler) userConfig(c *gin.Context) {
+	c.JSON(200, h.Service.UserConfig(c.Request.Context()))
+}
+func (h *Handler) updateUserConfig(c *gin.Context) {
+	c.JSON(200, h.Service.UpdateUserConfig(c.Request.Context(), transport.Body(c)))
 }

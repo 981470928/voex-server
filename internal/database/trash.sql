@@ -17,6 +17,3 @@ ALTER TABLE `folders`
   ADD KEY `idx_folders_deleted_by` (`deleted_by`),
   ADD CONSTRAINT `fk_folders_deleted_by`
     FOREIGN KEY (`deleted_by`) REFERENCES `users` (`id`);
-
-INSERT IGNORE INTO `schema_migrations` (`version`)
-VALUES ('006-trash');

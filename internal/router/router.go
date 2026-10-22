@@ -17,7 +17,7 @@ import (
 
 type Router struct{ engine *gin.Engine }
 
-func New(s *service.Service, origins []string, logger *log.Logger) *Router {
+func New(s *service.Service, logger *log.Logger) *Router {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.RedirectTrailingSlash = false
@@ -25,7 +25,7 @@ func New(s *service.Service, origins []string, logger *log.Logger) *Router {
 	engine.UseRawPath = true
 	engine.UnescapePathValues = true
 	shared.Must(engine.SetTrustedProxies([]string{"127.0.0.0/8", "::1/128"}))
-	engine.Use(middleware.AccessLog(logger), middleware.Recovery(), middleware.RequestPolicy(origins))
+	engine.Use(middleware.AccessLog(logger), middleware.Recovery(), middleware.RequestPolicy(), middleware.Maintenance())
 	h := handler.New(s, security.NewLimiter())
 	public := engine.Group("/api")
 	protected := public.Group("")
@@ -33,6 +33,7 @@ func New(s *service.Service, origins []string, logger *log.Logger) *Router {
 	optional := public.Group("")
 	optional.Use(middleware.Authentication(s, true))
 	h.RegisterAuthRoutes(public, protected)
+	h.RegisterSystemRoutes(public, protected)
 	h.RegisterAIRoutes(protected)
 	h.RegisterTeamRoutes(public, protected)
 	h.RegisterWorkspaceRoutes(protected)

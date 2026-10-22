@@ -48,27 +48,21 @@ func Load() {
 // Config groups application settings; secrets are loaded from the environment.
 type Config struct {
 	Address, SecretFile string
-	Origins             []string
 	Database            Database
 	Storage             Storage
 }
 type Database struct{ Host, Port, User, Password, Name string }
-type Storage struct{ Endpoint, Bucket, AccessKeyID, SecretAccessKey, TempDir string }
+type Storage struct{ Root string }
 
 func Read() Config {
 	Load()
 	return Config{
 		Address:    Env("VOEX_ADDR", "127.0.0.1:8090"),
 		SecretFile: Env("JWT_SECRET_FILE", "/home/server/.secrets/jwt-key"),
-		Origins:    strings.Split(Env("AUTH_ALLOWED_ORIGINS", "https://voex.jmin.site,https://jmin.site,http://218.76.62.176,http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"), ","),
 		Database: Database{
 			Host: Env("MYSQL_HOST", "127.0.0.1"), Port: Env("MYSQL_PORT", "3306"),
 			User: Env("MYSQL_USER", "root"), Password: Env("MYSQL_PASSWORD", ""), Name: Env("MYSQL_DATABASE", "file_server"),
 		},
-		Storage: Storage{
-			Endpoint: Env("R2_ENDPOINT", ""), Bucket: Env("R2_BUCKET", ""),
-			AccessKeyID: Env("R2_ACCESS_KEY_ID", ""), SecretAccessKey: Env("R2_SECRET_ACCESS_KEY", ""),
-			TempDir: Env("VOEX_TEMP_DIR", os.TempDir()),
-		},
+		Storage: Storage{Root: Env("VOEX_STORAGE_ROOT", "/home/static")},
 	}
 }
