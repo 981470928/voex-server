@@ -78,26 +78,12 @@
 | DELETE   | `/api/recent-files/:fileKey`                   | 仅移除本人的查看记录，无文件删除副作用。                                                 | `internal/handler/recent.go`    |
 | GET/HEAD | `/api/recent-files/:fileKey/attachments/:hash` | 重新检查文件读取权限并下载该文件附件。                                                   | `internal/handler/recent.go`    |
 
-## 健康与离线升级
+## 健康检查
 
-| 方法 | 路径                           | 用途与权限                                                                                   | 实现                         |
-| ---- | ------------------------------ | -------------------------------------------------------------------------------------------- | ---------------------------- |
-| GET  | `/api/health/live`             | 公开进程存活检查，不代表数据库可用。                                                         | `internal/handler/system.go` |
-| GET  | `/api/health/ready`            | 公开就绪检查，核对数据库 / schema / 存储，返回 version 与 schemaVersion；未就绪为 503。      | `internal/handler/system.go` |
-| GET  | `/api/system/info`             | 所有已登录用户读取版本、upgradeEnabled 和 canUpgrade。                                       | `internal/handler/system.go` |
-| GET  | `/api/system/releases`         | 所有已登录用户读取已导入的签名发行包。                                                       | Gin 代理 → updater           |
-| POST | `/api/system/packages`         | 所有已登录用户以 multipart 单字段 `file` 导入包，成功 201；包文件最大 2 GiB。                | Gin 代理 → updater           |
-| POST | `/api/system/upgrades`         | 所有已登录用户提交 `{version, requestId}` 启动兼容升级，成功 202，返回 `{job, watchToken}`。 | Gin 代理 → updater           |
-| GET  | `/api/system/upgrades/current` | 所有已登录用户读取最近任务及其只读 watchToken；无任务返回 `{job:null}`。                     | Gin 代理 → updater           |
-| GET  | `/api/upgrade-status/:jobID`   | Nginx 直达 updater，只接受该任务的 `X-Upgrade-Watch-Token`；不要求业务 JWT，不允许写入。     | `internal/updater/server.go` |
-
-升级权限按本次明确决定对所有已登录用户开放，不限团队管理员。系统代理使用服务器内部令牌，不接受客户端指定 updater 地址。未配置 updater 返回 503；包必须满足公钥签名、摘要、镜像 ID、归档路径和来源版本检查，登录不等于可以上传任意代码。
-
-相同 requestId / version 返回已有任务及监控凭证，重复 requestId 用于其他版本为 409；正在导入 / 升级、维护未恢复或来源版本不兼容同样拒绝。应用升级仅重建 API 并原子切换前端 dist 链接，不重建固定 Nginx，也不更新 MySQL / updater；备份与恢复见 [DOCKER.md](DOCKER.md)。
-
-业务端点、multipart 字段、版本选择与任务响应合同不变；升级包变为 v2 四文件 `release.json`、`release.sig`、`images.tar`（仅 API）、`frontend.tar.gz`。清单要求 `formatVersion=2` 和 `frontendSHA256`，删除 `webImage` / `webImageID`。前端 dist 验签后安全准备到版本目录，开始升级后才切换 current；固定 Nginx 只服务公共 dist 与累计 assets，不公开部署根的机密。v1 部署须先使用完整安装包中的 `migrate-frontend.sh` 完成一次基础设施转换，不能直接上传 v2 包给旧 updater。新发行版本 0.2.0 明确声明 `fromVersions: ["0.1.1"]`。
-
-维护标记存在时，Nginx / API 拒绝正常业务请求并返回 503 / Retry-After；健康端点、旧前端与独立任务状态通道保留。状态 token 仅授予单个任务读取能力，不代替登录或内部 updater 令牌；未知任务或无效 token 返回 404。请求头和 token 不得放入 URL、日志或公共文档示例。
+| 方法 | 路径 | 用途与权限 | 实现 |
+| ---- | ---- | ---------- | ---- |
+| GET | `/api/health/live` | 公开进程存活检查，返回 `{status:"ok"}`，不代表数据库可用。 | `internal/handler/health.go` |
+| GET | `/api/health/ready` | 公开就绪检查，核对数据库连接与存储目录；成功返回 `{status:"ok"}`，未就绪为 503。 | `internal/handler/health.go` |
 
 ## 原业务接口与删除语义
 

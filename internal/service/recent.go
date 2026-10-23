@@ -11,19 +11,21 @@ import (
 	"voex-server/internal/shared"
 )
 
-// Project membership and the visited share are independent authorization sources.
-// A share never confers parent-directory, rename, delete or sharing privileges.
-func recentPermissions(doc, project shared.Row) (shared.Row, string) {
+// File edit grants remain valid independently of recent-history retention.
+func (s *Service) recentPermissions(db *gorm.DB, ctx context.Context, doc, project shared.Row) (shared.Row, string) {
+	permissions := s.documentPermissions(db, ctx, doc, project)
 	if shared.Bool(project["read"]) {
-		return project, "project"
+		return permissions, "project"
 	}
 	permission := shared.String(doc["share_permission"])
-	read := permission == "read" || permission == "edit"
+	if permission == "read" || permission == "edit" {
+		permissions["read"] = true
+	}
 	access := "unavailable"
-	if read {
+	if shared.Bool(permissions["read"]) {
 		access = "share"
 	}
-	return shared.Row{"read": read, "write": permission == "edit", "manage": false, "share": false}, access
+	return permissions, access
 }
 
 func (s *Service) ListRecentFiles(ctx context.Context, limit int) (shared.Row, bool) {
@@ -49,7 +51,7 @@ func (s *Service) ListRecentFiles(ctx context.Context, limit int) (shared.Row, b
 				project = s.ProjectPermissions(db, ctx, projectKey)
 				projects[projectKey] = project
 			}
-			permissions, access := recentPermissions(doc, project)
+			permissions, access := s.recentPermissions(db, ctx, doc, project)
 			// No parent metadata or current file metadata is disclosed after access is lost.
 			item := shared.Row{
 				"file_key": doc["file_key"], "file_name": doc["viewed_name"],
@@ -101,7 +103,7 @@ func (s *Service) findRecentFile(db *gorm.DB, ctx context.Context, key, action s
 	if doc == nil {
 		shared.Fail(404, "最近查看记录不存在，请从原文件或分享链接重新打开")
 	}
-	permissions, access := recentPermissions(doc, s.ProjectPermissions(db, ctx, shared.String(doc["project_key"])))
+	permissions, access := s.recentPermissions(db, ctx, doc, s.ProjectPermissions(db, ctx, shared.String(doc["project_key"])))
 	if !shared.Bool(permissions[action]) {
 		shared.Fail(403, "文件访问权限已变更或分享已撤销")
 	}

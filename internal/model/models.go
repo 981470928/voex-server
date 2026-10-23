@@ -1,4 +1,4 @@
-// Package model maps the existing MySQL schema; schema changes use explicit migrations.
+// Package model maps the existing MySQL schema.
 package model
 
 import "time"
@@ -45,6 +45,15 @@ type Document struct {
 }
 
 func (Document) TableName() string { return "documents" }
+
+type DocumentAccess struct {
+	Permission string    `gorm:"column:permission" json:"-"`
+	DocumentID int64     `gorm:"column:document_id;primaryKey;autoIncrement:false" json:"-"`
+	UserID     string    `gorm:"column:user_id;primaryKey" json:"-"`
+	GrantedAt  time.Time `gorm:"column:granted_at;autoCreateTime:false" json:"-"`
+}
+
+func (DocumentAccess) TableName() string { return "document_access" }
 
 type FileShare struct {
 	ID         string     `gorm:"column:id;primaryKey" json:"-"`
@@ -117,13 +126,6 @@ type Project struct {
 }
 
 func (Project) TableName() string { return "projects" }
-
-type SchemaMigration struct {
-	Version   string    `gorm:"column:version;primaryKey" json:"-"`
-	AppliedAt time.Time `gorm:"column:applied_at" json:"-"`
-}
-
-func (SchemaMigration) TableName() string { return "schema_migrations" }
 
 type TeamInvite struct {
 	ID        string     `gorm:"column:id;primaryKey" json:"-"`

@@ -28,8 +28,14 @@
 
 `DELETE /api/recent-files/:fileKey` 幂等返回 `{ success: true }`。只删除当前账号的查看记录，不要求文件写权限，不删除文档、附件、分享，也不影响其他账号的记录。再次从项目或有效分享链接打开文件会重新产生记录。移除后不能再凭该记录访问分享文件，需要重新打开原链接。
 
-## 迁移
+## 数据库结构
 
-服务启动时按 schema 锁执行 `004-recent-files`，定义位于 `internal/database/recent-files.sql`。历史访问无法回填，从部署后的成功文件读取开始记录。原始分享 token 不存入查看记录或客户端持久存储。
+`recent_files` 定义位于 `internal/database/schema.sql`，空库需手动初始化。查看记录从成功文件读取开始产生，不回填历史访问。原始分享 token 不存入查看记录或客户端持久存储。
 
-文件修改人由后续 `005-document-details` 迁移添加，定义位于 `internal/database/document-details.sql`；历史修改人保持未记录。
+文件修改人字段也定义于完整初始化 SQL；没有记录修改人的历史文件显示“未记录”。
+
+## 文件权限更新（2026-10-23）
+
+登录用户 GET 有效分享链接后，按账号与文件保存 read/edit 权限，权限只升级、不因新的只读访问降级。删除最近记录和撤销分享链接不收回已有账号授权；撤销只阻止新的链接访问。匿名访问不写入账号授权。
+
+普通 `/api/document/:fileKey`、附件、AI、分享接口统一识别该授权，编辑页无需携带分享令牌或来源参数。文件 DTO 的 permissions 包含 read/write/manage/share/remove；编辑者的文件功能与创建者一致，只有创建者的 remove 为 true。删除 API 单独校验创建者，父级级联和永久删除同样不能绕过该限制。文件授权不增加项目/团队管理权，目录只返回该用户可访问的文档及其所属文件夹。

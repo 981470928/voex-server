@@ -1,6 +1,6 @@
 # AI 模型配置与文档审阅
 
-所有接口沿用 `/api` 前缀与现有账号认证。配置、对话按登录用户隔离；文档操作继续使用项目权限。迁移 `internal/database/ai.sql`、`internal/database/ai-history.sql` 与 `internal/database/ai-sessions.sql` 由启动时的 schema 初始化锁执行，新建模型、应用记录与对话历史表，不修改已有文档正文。
+所有接口沿用 `/api` 前缀与现有账号认证。配置、对话按登录用户隔离；文档操作继续使用项目权限。模型、应用记录与对话历史表定义统一保存在 `internal/database/schema.sql`，空库需手动初始化；服务启动不自动修改结构。
 
 ## 模型配置
 
@@ -13,6 +13,7 @@
 | POST | `/ai/reviews/:id/apply` | 原子应用一份审阅，id 使用该快照的 UUID |
 | GET | `/ai/conversations/:fileKey/sessions?before=...` | 按当前账号、文档读取最近 20 个会话 |
 | PUT | `/ai/conversations/:fileKey/sessions/:id` | 幂等新建会话，接受空请求体或 `{}` |
+| DELETE | `/ai/conversations/:fileKey/sessions/:id` | 删除当前账号在该文档下的会话及其消息、审阅快照 |
 | GET | `/ai/conversations/:fileKey?session_id=...&before=...` | 读取指定会话最近 20 轮或游标之前的历史 |
 | PUT | `/ai/conversations/:fileKey/turns/:id` | 保存一轮用户指令与未完成的助手消息 |
 | PUT | `/ai/conversations/:fileKey/turns/:id/response` | 一次保存完成的回复及独立审阅快照 |
@@ -20,11 +21,35 @@
 
 PUT 请求字段：`name`、`protocol`（`openai` / `anthropic`）、`base_url`、`model`、`api_key`、`temperature`（数字或 null）、`max_tokens`（1–131072）、`token_parameter`（`max_completion_tokens` / `max_tokens`，默认前者）。Claude 固定使用 `max_tokens`。Temperature 可留空，具体输出限额仍取决于第三方模型。
 
-地址允许公网 HTTPS Base URL 或完整接口地址；域名根路径补 `/v1`，OpenAI 补 `/chat/completions`，Claude 补 `/messages`。无凭据、query、fragment，禁止重定向、环境 HTTP 代理和私网目标。DNS 在实际连接时解析并固定经检查的地址。后端默认请求超时 120 秒；客户端中止会取消上游请求。
+地址允许公网 HTTPS Base URL 或完整接口地址；域名根路径补 `/v1`，OpenAI 补 `/chat/completions`，Claude 补 `/messages`。无凭据、query、fragment，禁止重定向、环境 HTTP 代理和私网目标。DNS 在实际连接时解析并固定经检查的地址。AI 请求不设置总时长和响应头等待时长上限；建立连接和 TLS 握手仍各受 15 秒限制。客户端中止会取消上游请求，并释放账号的进行中请求占用；响应仍最多 2 MiB。
 
 Key 使用 AES-GCM 加密，随机 nonce，AAD 绑定账号和配置 ID；加密密钥由已有服务端 JWT secret 通过独立用途的 HMAC-SHA256 派生。备份或迁移必须保留原 `JWT_SECRET_FILE`；更换该密钥后旧配置需重新录入 Key。Key 不进入 URL、日志、列表响应或浏览器持久存储。修改时空 Key 保留旧密钥；更换地址或协议必须重填。每账号最多 30 个配置，最多一个进行中的模型请求。
 
-Chat 请求接受 `messages`、`tools` 及 Claude 的 `system`。模型 ID、鉴权、目标地址、输出参数取自服务端保存的配置，不能由 chat 请求覆盖。本期采用非流式多轮工具调用；响应为对应协议原始 JSON。OpenAI 使用 `tools` / `tool_calls` / `tool` 消息；Claude 使用 `input_schema` / `tool_use` / `tool_result`。上游错误转换为不携带原始响应或密钥的 502 提示。
+Chat 请求接受 `messages`、`tools` 及 Claude 的 `system`。模型 ID、鉴权、目标地址、输出参数取自服务端保存的配置，不能由 chat 请求覆盖。上游模型继续使用 `stream: false` 完成每轮工具调用；未请求 SSE 的客户端仍收到对应协议原始 JSON。OpenAI 使用 `tools` / `tool_calls` / `tool` 消息；Claude 使用 `input_schema` / `tool_use` / `tool_result`。上游错误转换为不携带原始响应或密钥的 502 提示。
+
+## Chat 流式传输与心跳
+
+`POST /ai/models/:id/chat` 支持通过 `Accept: text/event-stream` 显式启用 SSE；请求体、认证、模型配置和工具协议均不变，不带此 Accept 的旧客户端仍沿用同步 JSON 响应。
+
+通过认证并校验路径、JSON 请求体后，服务端立即返回 HTTP 200、`Content-Type: text/event-stream; charset=utf-8`、`Cache-Control: no-cache`、`X-Accel-Buffering: no`，发送 `: connected` 注释并刷新响应；等待模型期间每 15 秒发送 `: heartbeat` 注释并刷新。心跳不包含模型文本，不代表 token 增量；每次调用仍只交付一份完整模型 JSON。
+
+成功后发送一个 `result` 事件，data 为压缩到单行的完整原协议 JSON，然后关闭流：
+
+```text
+event: result
+data: {"choices":[{"message":{"content":"..."}}]}
+
+```
+
+流已建立后，业务或模型失败发送一个 `error` 事件，然后关闭流；data 为 `{"error":"安全错误提示","status":502}`，status 使用既有业务错误映射。HTTP 状态在响应头发送后仍为 200，客户端必须检查事件；不会传回上游错误正文、密钥、数据库细节或 panic 内容。认证、路径和请求体校验等建流前错误继续使用原 HTTP 状态及 `{error: ...}` JSON。
+
+```text
+event: error
+data: {"error":"无法连接模型服务，请检查公网 HTTPS 地址或稍后重试","status":502}
+
+```
+
+客户端应忽略注释，直到收到 `result` 或 `error`；流结束前未收到终结事件应视为连接中断。停止、切换文档或关闭面板时通过 AbortSignal 断开连接；服务端同步取消上游和心跳，不自动重试模型调用。应用自身不限制 AI 总生成时长，代理应关闭该接口缓冲并允许 15 秒心跳持续通过；第三方模型服务仍可能执行自己的时间限制。
 
 ## 审阅应用
 
@@ -59,7 +84,11 @@ Chat 请求接受 `messages`、`tools` 及 Claude 的 `system`。模型 ID、鉴
 
 新建接口的 id 由客户端生成并在重试时保留，只接受 1–64 位英文字母、数字、下划线或连字符；同一账号、文档、id 重试返回原会话，不清空消息或改写标题。默认标题为“新对话”。会话第一条指令保存时会折叠空白为单空格，并取前 40 个 Unicode 字符作为标题；后续指令不改名。新建和列表都校验源文档读取权限。
 
-009 迁移将已有的每组账号、文档历史归入 id 为 `default`、标题为“历史对话”的会话，保留每轮消息、时间、快照及应用状态。没有历史的文档不创建默认会话。旧客户端省略 session_id 时读取或写入 default；首次旧客户端写入时按需创建默认会话。显式指定不存在的会话返回 404，不能将其他会话的轮次迁入当前会话。
+删除会话接口沿用同一会话标识校验，并在 workspace 写事务内重新验证源文档读取权限；仅删除当前账号、指定文档、指定会话的记录。成功返回 `{"success":true}`，同一会话已不存在时仍返回成功，便于网络结果不明后安全重试；不存在或无权访问源文档仍返回既有权限错误。外键在同一事务中级联删除该会话的全部轮次、回复与审阅快照，不修改已应用的文档、不删除 `ai_review_applications` 的历史去重记录；删除后不能再通过原会话读取历史或打开、应用该快照。
+
+会话删除与新建、开始/完成轮次、应用审阅使用同一 workspace 写锁串行执行。写入先完成时会一并删除该会话已保存的数据；删除先完成时，显式会话的新轮次和旧轮次的完成请求返回 404，不会将它们改挂到其他会话。显式再次调用同一会话 ID 的新建接口仍视为新建；旧客户端省略 session_id 时仍遵循下述 default 兼容行为。前端应在生成、保存及存在未保存回复时禁用删除，并在用户确认后发送 DELETE；服务端删除不负责取消已发往上游的模型请求。
+
+兼容会话使用 id `default`、标题“历史对话”。没有历史的文档不预建默认会话。旧客户端省略 session_id 时读取或写入 default；首次旧客户端写入时按需创建默认会话。显式指定不存在的会话返回 404，不能将其他会话的轮次迁入当前会话。
 
 `ai_conversation_turns` 的一行代表一轮用户指令和助手回复。唯一键仍为 `(user_id, turn_id)`；源文档通过 `document_id` 关联。完成回复后 `finish_hash` 锁定回复、活动记录、错误和快照内容，相同请求可重试，不同请求返回 409。`(user_id, review_id)` 唯一，不能将同一个审阅绑定到另一条回复。
 

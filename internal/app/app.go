@@ -11,7 +11,7 @@ import (
 	"syscall"                        // 提供 SIGINT、SIGTERM 等信号常量。
 	"time"                           // 提供秒、分钟等时间单位。
 	"voex-server/internal/config"    // 读取应用配置。
-	"voex-server/internal/database"  // 初始化数据库连接和表结构。
+	"voex-server/internal/database"  // 初始化数据库连接。
 	"voex-server/internal/filestore" // 初始化文件存储及其临时目录。
 	"voex-server/internal/router"    // 组装 Gin 路由和中间件。
 	"voex-server/internal/security"  // 加载或创建 JWT 签名密钥。
@@ -47,11 +47,11 @@ func Run() (err error) {
 	}
 	// Run 退出时清理存储的进程临时目录；Close 仅删除空目录。
 	defer files.Close()
-	// 仅连接并验证现有 schema；结构变更必须由独立 migrate 命令执行。
+	// 连接已初始化的数据库，不自动修改表结构。
 	db, err := database.Open(cfg.Database)
 	// 数据库初始化失败时，终止启动；此前注册的 defer 仍会执行。
 	if err != nil {
-		// 保留数据库兼容性与连接错误，便于独立迁移和部署诊断。
+		// 保留连接错误，便于诊断数据库配置。
 		return fmt.Errorf("database initialization failed: %w", err)
 	}
 	// 从 GORM 获取底层的 *sql.DB 连接池，供退出时统一关闭。
@@ -71,7 +71,7 @@ func Run() (err error) {
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
-		runTrashCleanup(cleanupCtx, business, config.Env("VOEX_MAINTENANCE_FILE", ""))
+		business.RunTrashCleanup(cleanupCtx)
 	}()
 	defer func() {
 		cancelCleanup()
@@ -89,7 +89,7 @@ func Run() (err error) {
 		Handler: routes,
 		// 将 10 乘以秒单位，限制读取请求头的时间为 10 秒。
 		ReadHeaderTimeout: 10 * time.Second,
-		// 限制整个请求读取时间，默认 2 分钟；离线上传部署可显式设置 30m。
+		// 限制整个请求读取时间，默认 2 分钟，可通过环境变量调整。
 		ReadTimeout: readTimeout,
 		// 将 60 乘以秒单位，限制长连接等待下一个请求的空闲时间为 60 秒。
 		IdleTimeout: 60 * time.Second,
@@ -144,53 +144,4 @@ func Run() (err error) {
 	log.Print("[Server] HTTP listener closed")
 	// 信号触发的关闭流程返回 nil；即使进入过强制关闭分支，也不返回关闭错误。
 	return nil
-}
-
-// runTrashCleanup gates only the background write worker. API readiness remains
-// available during maintenance. The updater stops the old API before migrating;
-// a newly started API sees the existing file and does not start cleanup until
-// the updater removes it after acceptance.
-func runTrashCleanup(ctx context.Context, business *service.Service, maintenanceFile string) {
-	if maintenanceFile == "" {
-		business.RunTrashCleanup(ctx)
-		return
-	}
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	var workerCancel context.CancelFunc
-	var workerDone chan struct{}
-	stop := func() {
-		if workerCancel != nil {
-			workerCancel()
-			<-workerDone
-			workerCancel, workerDone = nil, nil
-		}
-	}
-	defer stop()
-	for {
-		// Unknown filesystem errors fail closed instead of enabling writes.
-		_, err := os.Stat(maintenanceFile)
-		allowed := os.IsNotExist(err)
-		if allowed && workerCancel == nil && ctx.Err() == nil {
-			workerCancel, workerDone = startTrashCleanup(ctx, business)
-		} else if !allowed {
-			stop()
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-// Return cancellation ownership to the maintenance gate, which joins the worker.
-func startTrashCleanup(ctx context.Context, business *service.Service) (context.CancelFunc, chan struct{}) {
-	workerCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		business.RunTrashCleanup(workerCtx)
-	}()
-	return cancel, done
 }

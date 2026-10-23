@@ -139,7 +139,9 @@ func (s *Service) PurgeDocument(ctx context.Context, key string) {
 		if document == nil {
 			shared.Fail(404, "文档不存在")
 		}
-		s.RequireProject(db, ctx, shared.String(document["project_key"]), "write")
+		if !shared.Bool(s.DocumentPermissions(db, ctx, document)["remove"]) {
+			shared.Fail(403, "只有创建者可以删除文件")
+		}
 		if document["deleted_at"] == nil {
 			shared.Fail(409, "文档不在回收站中")
 		}
@@ -161,6 +163,7 @@ func (s *Service) PurgeFolder(ctx context.Context, key string) {
 			shared.Fail(409, "文件夹不在回收站中")
 		}
 
+		s.requireFolderDocumentDeletion(db, ctx, folder["project_id"], folder["id"])
 		repository.WorkspaceDeleteFolder(db, folder["project_id"], folder["id"])
 		return nil
 	})

@@ -137,6 +137,7 @@ func (s *Service) DeleteProject(ctx context.Context, key string, cascade bool) {
 		if !cascade && repository.WorkspaceProjectHasFolders(db, project["id"]) {
 			shared.Fail(409, "项目中有子项，请确认连同所有子项一起删除")
 		}
+		s.requireFolderDocumentDeletion(db, ctx, project["id"], nil)
 		repository.WorkspaceDeleteProject(db, project["id"])
 		return nil
 	})
@@ -145,15 +146,28 @@ func (s *Service) DeleteProject(ctx context.Context, key string, cascade bool) {
 func (s *Service) ProjectTree(ctx context.Context, key string) shared.Row {
 	return s.tx(ctx, false, func(db *gorm.DB) any {
 		project := workspaceFindProject(db, key)
-		permissions := s.RequireProject(db, ctx, key, "read")
+		permissions := s.ProjectPermissions(db, ctx, key)
 		folders := repository.WorkspaceFolders(db, project["id"])
 		documents := repository.WorkspaceProjectDocuments(db, project["id"])
 		folderList, documentList := make([]shared.Row, 0, len(folders)), make([]shared.Row, 0, len(documents))
-		for _, folder := range folders {
-			folderList = append(folderList, folderDTO(folder, key))
-		}
+		visibleFolders := map[string]bool{}
 		for _, document := range documents {
-			documentList = append(documentList, DocumentDTO(document))
+			access := s.documentPermissions(db, ctx, document, permissions)
+			if !shared.Bool(access["read"]) {
+				continue
+			}
+			item := DocumentDTO(document)
+			item["permissions"] = access
+			documentList = append(documentList, item)
+			visibleFolders[shared.String(document["folder_key"])] = true
+		}
+		if !shared.Bool(permissions["read"]) && len(documentList) == 0 {
+			shared.Fail(404, "项目不存在或没有访问权限")
+		}
+		for _, folder := range folders {
+			if shared.Bool(permissions["read"]) || visibleFolders[shared.String(folder["folder_key"])] {
+				folderList = append(folderList, folderDTO(folder, key))
+			}
 		}
 		return shared.Row{"project": projectDTO(project, permissions), "folders": folderList, "documents": documentList}
 	}).(shared.Row)
@@ -194,6 +208,7 @@ func (s *Service) DeleteFolder(ctx context.Context, key string, cascade bool) {
 		}
 
 		userID := shared.String(identity.User(ctx)["id"])
+		s.requireFolderDocumentDeletion(db, ctx, project["id"], folder["id"])
 		repository.WorkspaceTrashFolder(db, folder["id"], userID)
 		return nil
 	})
@@ -297,7 +312,11 @@ func (s *Service) FindDocument(db *gorm.DB, ctx context.Context, key, action str
 	if row == nil {
 		shared.Fail(404, "文档不存在")
 	}
-	s.RequireProject(db, ctx, shared.String(row["project_key"]), action)
+	permissions := s.DocumentPermissions(db, ctx, row)
+	if !shared.Bool(permissions[action]) {
+		shared.Fail(403, "没有此文件的操作权限")
+	}
+	row["permissions"] = permissions
 	return row
 }
 
@@ -327,7 +346,7 @@ func (s *Service) GetDocument(ctx context.Context, key string, recordVisit bool)
 		row := s.FindDocument(db, ctx, key, "read", true)
 		result := DocumentDTO(row)
 		result["file_content"] = row["file_content"]
-		result["permissions"] = s.ProjectPermissions(db, ctx, shared.String(row["project_key"]))
+		result["permissions"] = row["permissions"]
 		if recordVisit {
 			repository.RecordRecentFile(db, shared.String(identity.User(ctx)["id"]), row)
 		}
@@ -383,7 +402,7 @@ func (s *Service) UpdateDocument(ctx context.Context, key string, input UpdateDo
 
 func (s *Service) DeleteDocument(ctx context.Context, key string) {
 	s.tx(ctx, true, func(db *gorm.DB) any {
-		document := s.FindDocument(db, ctx, key, "write", false)
+		document := s.FindDocument(db, ctx, key, "remove", false)
 		userID := shared.String(identity.User(ctx)["id"])
 
 		repository.WorkspaceTrashDocument(db, document["id"], userID)

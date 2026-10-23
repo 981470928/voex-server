@@ -24,7 +24,13 @@ func (h *Handler) RegisterAIRoutes(protected *gin.RouterGroup) {
 	})
 	// 固定转发到账号已保存的模型，客户端不能传入密钥或覆盖目标地址。
 	protected.POST("/ai/models/:id/chat", func(c *gin.Context) {
-		result := h.Service.AIChat(c.Request.Context(), shared.Key(c.Param("id"), "配置标识"), transport.Body(c))
+		id := shared.Key(c.Param("id"), "配置标识")
+		body := transport.Body(c)
+		if acceptsAIStream(c.GetHeader("Accept")) {
+			h.streamAIChat(c, id, body)
+			return
+		}
+		result := h.Service.AIChat(c.Request.Context(), id, body)
 		c.Data(http.StatusOK, "application/json; charset=utf-8", result)
 	})
 	// 只有用户应用审阅时调用；所有文件在同一事务内检查权限、版本并保存。
@@ -47,6 +53,10 @@ func (h *Handler) RegisterAIRoutes(protected *gin.RouterGroup) {
 			shared.Fail(400, "新建会话不接受额外字段")
 		}
 		c.JSON(http.StatusOK, h.Service.CreateAISession(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), shared.Key(c.Param("id"), "会话标识")))
+	})
+	protected.DELETE("/ai/conversations/:fileKey/sessions/:id", func(c *gin.Context) {
+		h.Service.DeleteAISession(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), shared.Key(c.Param("id"), "会话标识"))
+		c.JSON(http.StatusOK, shared.Row{"success": true})
 	})
 	protected.GET("/ai/conversations/:fileKey", func(c *gin.Context) {
 		c.JSON(http.StatusOK, h.Service.AIConversation(c.Request.Context(), shared.Key(c.Param("fileKey"), "文件标识"), c.Query("session_id"), aiHistoryCursor(c)))

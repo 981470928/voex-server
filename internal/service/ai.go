@@ -192,9 +192,8 @@ func aiDial(ctx context.Context, network, address string) (net.Conn, error) {
 }
 
 var aiHTTP = &http.Client{
-	Timeout:       120 * time.Second,
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	Transport:     &http.Transport{DialContext: aiDial, TLSHandshakeTimeout: 15 * time.Second, ResponseHeaderTimeout: 120 * time.Second, IdleConnTimeout: 60 * time.Second, MaxIdleConnsPerHost: 2},
+	Transport:     &http.Transport{DialContext: aiDial, TLSHandshakeTimeout: 15 * time.Second, IdleConnTimeout: 60 * time.Second, MaxIdleConnsPerHost: 2},
 }
 var aiActive sync.Map
 

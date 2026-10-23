@@ -37,6 +37,7 @@ func TrashDocumentByKey(db *gorm.DB, key string) shared.Row {
 		Select(`
 			d.id,
 			d.file_key,
+            d.creator_id,
 			d.deleted_at,
 			f.deleted_at AS folder_deleted_at,
 			p.project_key

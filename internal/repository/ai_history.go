@@ -64,6 +64,11 @@ func InsertAISession(db *gorm.DB, user string, documentID any, id, title string)
 	}))
 }
 
+// The session foreign key cascades turns and snapshots; application records remain intact.
+func DeleteAISession(db *gorm.DB, user string, documentID any, id string) {
+	Must(db.Table("ai_conversation_sessions").Where("user_id=? AND document_id=? AND session_id=?", user, documentID, id).Delete(&map[string]any{}))
+}
+
 func AISessionHasTurns(db *gorm.DB, user string, documentID any, id string) bool {
 	return One(db.Table("ai_conversation_turns").Select("id").Where("user_id=? AND document_id=? AND session_id=?", user, documentID, id)) != nil
 }

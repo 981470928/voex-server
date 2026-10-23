@@ -174,6 +174,19 @@ func (s *Service) CreateAISession(ctx context.Context, fileKey, id string) share
 	}).(shared.Row)
 }
 
+// DeleteAISession shares the workspace write lock with turn writes and review applications.
+func (s *Service) DeleteAISession(ctx context.Context, fileKey, id string) {
+	if !aiHistoryID.MatchString(id) {
+		shared.Fail(400, "会话标识格式不正确")
+	}
+	s.tx(ctx, true, func(db *gorm.DB) any {
+		document := s.FindDocument(db, ctx, fileKey, "read", false)
+		user := shared.String(identity.User(ctx)["id"])
+		repository.DeleteAISession(db, user, document["id"], id)
+		return nil
+	})
+}
+
 func validateAIReview(review *AIReviewInput, fileKey string) {
 	if !aiHistoryID.MatchString(review.ID) || len(review.Changes) == 0 || len(review.Changes) > 20 {
 		shared.Fail(400, "审阅标识或文件数量不正确")

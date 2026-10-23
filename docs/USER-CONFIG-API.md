@@ -12,7 +12,7 @@ API 前缀为 `/api`，沿用现有 Bearer access token / 登录 Cookie 鉴权�
 {"userConfig": {}}
 ```
 
-新用户和升级前已有用户的初始配置均为 `{}`。响应始终包含完整配置对象。
+新用户的初始配置为 `{}`。响应始终包含完整配置对象。
 
 ## 新增或修改
 
@@ -73,8 +73,8 @@ API 前缀为 `/api`，沿用现有 Bearer access token / 登录 Cookie 鉴权�
 
 每次合并在事务中锁定当前用户的数据库行后读取最新配置，避免并发修改不同字段时互相覆盖。并发修改同一个字段时，以后取得行锁并完成合并的请求为准；不同账号的配置相互隔离。已保存的 JSON 数字读取和合并时保留数值文本，避免转换为 float64 引入精度丢失。
 
-## 数据库迁移
+## 数据库结构
 
-新增 `010-user-config`（`internal/database/user-config.sql`），为 `users` 添加 `user_config JSON NOT NULL DEFAULT (JSON_OBJECT())`。历史迁移 SQL 保持原文，遵守已有 checksum / dirty / 未登记结构检测机制。
+`users.user_config` 定义为 `JSON NOT NULL DEFAULT (JSON_OBJECT())`，新账号使用空对象默认值。
 
-在目标环境按现有部署流程完成备份和独立 `voex-server migrate` 后，再启动新版服务；`serve` 不自动执行 DDL。
+空库初始化结构见 `internal/database/schema.sql`；开发阶段已有数据库由开发者显式维护，服务启动不自动执行 DDL。

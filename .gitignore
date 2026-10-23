@@ -8,7 +8,7 @@ logs/
 
 .gin-backup-path
 
-# Docker release artifacts and signing secrets
+# Historical generated artifacts and private keys
 /deploy/artifacts/
 /dist/
 /.release-keys/

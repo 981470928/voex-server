@@ -36,8 +36,12 @@ func documentDetailsDTO(doc, permissions shared.Row, access string) shared.Row {
 func (s *Service) GetDocumentDetails(ctx context.Context, key string) shared.Row {
 	return s.tx(ctx, false, func(db *gorm.DB) any {
 		doc := s.FindDocument(db, ctx, key, "read", false)
-		permissions := s.ProjectPermissions(db, ctx, shared.String(doc["project_key"]))
-		return documentDetailsDTO(doc, permissions, "project")
+		permissions := s.DocumentPermissions(db, ctx, doc)
+		access := "share"
+		if shared.Bool(s.ProjectPermissions(db, ctx, shared.String(doc["project_key"]))["read"]) {
+			access = "project"
+		}
+		return documentDetailsDTO(doc, permissions, access)
 	}).(shared.Row)
 }
 

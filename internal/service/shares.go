@@ -29,7 +29,7 @@ func (s *Service) sharedDocument(db *gorm.DB, ctx context.Context, token string)
 	}
 	write := shared.String(doc["permission"]) == "edit"
 	if identity.OptionalUser(ctx) != nil {
-		permissions := s.ProjectPermissions(db, ctx, shared.String(doc["project_key"]))
+		permissions := s.DocumentPermissions(db, ctx, doc)
 		write = write || shared.Bool(permissions["write"])
 	}
 	return doc, shared.Row{"read": true, "write": write, "manage": false, "share": false}
@@ -59,7 +59,7 @@ func (s *Service) ListDocumentShares(ctx context.Context, rawKey string) []share
 	key := shared.Key(rawKey, "文件标识")
 	return s.tx(ctx, false, func(db *gorm.DB) any {
 		doc := s.FindDocument(db, ctx, key, "share", false)
-		permissions := s.ProjectPermissions(db, ctx, shared.String(doc["project_key"]))
+		permissions := s.DocumentPermissions(db, ctx, doc)
 		rows := repository.ListDocumentShares(db, doc["id"])
 		result := make([]shared.Row, 0, len(rows))
 		for _, row := range rows {
@@ -95,7 +95,7 @@ func (s *Service) RevokeDocumentShare(ctx context.Context, rawKey, id string) {
 		if share == nil {
 			shared.Fail(404, "分享记录不存在")
 		}
-		permissions := s.ProjectPermissions(db, ctx, shared.String(doc["project_key"]))
+		permissions := s.DocumentPermissions(db, ctx, doc)
 		if !shared.Bool(permissions["manage"]) && shared.String(share["created_by"]) != shared.String(identity.User(ctx)["id"]) {
 			shared.Fail(403, "只能撤销自己创建的分享")
 		}
@@ -120,6 +120,7 @@ func (s *Service) GetSharedDocument(ctx context.Context, token string, recordVis
 	return s.tx(ctx, recordVisit, func(db *gorm.DB) any {
 		doc, permissions := s.sharedDocument(db, ctx, token)
 		if recordVisit {
+			repository.GrantDocumentAccess(db, doc["id"], shared.String(user["id"]), shared.String(doc["permission"]))
 			repository.RecordRecentFile(db, shared.String(user["id"]), doc)
 		}
 		avator := ""
