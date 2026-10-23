@@ -13,21 +13,16 @@ func RecordRecentFile(db *gorm.DB, userID string, doc shared.Row) {
 		"viewed_at": gorm.Expr("CURRENT_TIMESTAMP(6)"),
 	}
 	updates := map[string]any{"file_name": doc["file_name"], "viewed_at": gorm.Expr("CURRENT_TIMESTAMP(6)")}
-	if shareID := shared.String(doc["share_id"]); shareID != "" {
-		values["share_id"] = shareID
-		updates["share_id"] = shareID
-	}
 	Must(db.Table("recent_files").Clauses(clause.OnConflict{DoUpdates: clause.Assignments(updates)}).Create(values))
 }
 
 func recentFileQuery(db *gorm.DB, userID string, content bool) *gorm.DB {
-	columns := DocumentColumns + ",r.file_name AS viewed_name,r.viewed_at,r.share_id,s.permission AS share_permission"
+	columns := DocumentColumns + ",r.file_name AS viewed_name,r.viewed_at"
 	if content {
 		columns += ",d.file_content"
 	}
 	return DocumentQuery(db, false).Select(columns).
-		Joins("JOIN recent_files r ON r.document_id=d.id AND r.user_id=?", userID).
-		Joins("LEFT JOIN file_shares s ON s.id=r.share_id AND s.document_id=d.id AND s.revoked_at IS NULL")
+		Joins("JOIN recent_files r ON r.document_id=d.id AND r.user_id=?", userID)
 }
 
 func RecentFiles(db *gorm.DB, userID string, limit int) []shared.Row {

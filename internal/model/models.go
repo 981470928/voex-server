@@ -46,6 +46,14 @@ type Document struct {
 
 func (Document) TableName() string { return "documents" }
 
+type DocumentSharing struct {
+	DocumentID  int64 `gorm:"column:document_id;primaryKey;autoIncrement:false" json:"-"`
+	ReadEnabled bool  `gorm:"column:read_enabled" json:"-"`
+	EditEnabled bool  `gorm:"column:edit_enabled" json:"-"`
+}
+
+func (DocumentSharing) TableName() string { return "document_sharing" }
+
 type DocumentAccess struct {
 	Permission string    `gorm:"column:permission" json:"-"`
 	DocumentID int64     `gorm:"column:document_id;primaryKey;autoIncrement:false" json:"-"`

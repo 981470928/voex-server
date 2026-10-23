@@ -9,7 +9,7 @@ import (
 // TrashFolderByKey 查询文件夹及其删除状态，供回收站操作使用。
 func TrashFolderByKey(db *gorm.DB, key string) shared.Row {
 	return One(db.Table("folders AS f").
-		Select("f.id, f.project_id, f.deleted_at, p.project_key").
+		Select("f.id, f.project_id, f.deleted_at, f.deleted_by, p.project_key").
 		Joins("JOIN projects p ON p.id = f.project_id").
 		Where("f.folder_key = ?", key))
 }
@@ -38,6 +38,7 @@ func TrashDocumentByKey(db *gorm.DB, key string) shared.Row {
 			d.id,
 			d.file_key,
             d.creator_id,
+            d.deleted_by,
 			d.deleted_at,
 			f.deleted_at AS folder_deleted_at,
 			p.project_key
@@ -65,7 +66,7 @@ func TrashRestoreDocument(db *gorm.DB, documentID any) bool {
 }
 
 // trashListQuery 合并指定项目中未到期的回收站记录。
-func trashListQuery(db *gorm.DB, projectIDs []int64) *gorm.DB {
+func trashListQuery(db *gorm.DB, projectIDs []int64, deletedBy string) *gorm.DB {
 	documents := db.Table("documents AS d").
 		Select(`
 			'document' AS item_type,
@@ -113,20 +114,24 @@ func trashListQuery(db *gorm.DB, projectIDs []int64) *gorm.DB {
 			projectIDs,
 		)
 
+	if deletedBy != "" {
+		documents = documents.Where("d.deleted_by=?", deletedBy)
+		folders = folders.Where("f.deleted_by=?", deletedBy)
+	}
 	return db.Table("(? UNION ALL ?) AS trash_items", documents, folders)
 }
 
 // TrashList 返回分页结果和总数。
 // projectIDs 必须由 Service 筛选为当前用户具有项目写权限的项目。
-func TrashList(db *gorm.DB, projectIDs []int64, limit, offset int) ([]shared.Row, int64) {
+func TrashList(db *gorm.DB, projectIDs []int64, deletedBy string, limit, offset int) ([]shared.Row, int64) {
 	if len(projectIDs) == 0 {
 		return []shared.Row{}, 0
 	}
 
 	var total int64
-	Must(trashListQuery(db, projectIDs).Count(&total))
+	Must(trashListQuery(db, projectIDs, deletedBy).Count(&total))
 
-	items := Rows(trashListQuery(db, projectIDs).
+	items := Rows(trashListQuery(db, projectIDs, deletedBy).
 		Order("deleted_at DESC, item_type ASC, resource_key ASC").
 		Limit(limit).
 		Offset(offset))
@@ -198,4 +203,17 @@ func TrashPurgeExpiredFolder(db *gorm.DB, folderID int64) bool {
 
 	WorkspaceDeleteFolder(db, folder["project_id"], folder["id"])
 	return true
+}
+
+func AllTrashFolders(db *gorm.DB, projectIDs []int64) []shared.Row {
+	if len(projectIDs) == 0 {
+		return []shared.Row{}
+	}
+	return Rows(db.Table("folders").Select("id,project_id").Where("project_id IN ? AND deleted_at IS NOT NULL", projectIDs))
+}
+func AllTrashDocuments(db *gorm.DB, projectIDs []int64) []shared.Row {
+	if len(projectIDs) == 0 {
+		return []shared.Row{}
+	}
+	return Rows(db.Table("documents d").Select("d.id,d.file_key,f.deleted_at AS folder_deleted_at").Joins("JOIN folders f ON f.id=d.folder_id").Where("f.project_id IN ? AND d.deleted_at IS NOT NULL", projectIDs))
 }

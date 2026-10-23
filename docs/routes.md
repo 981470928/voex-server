@@ -1,3 +1,5 @@
+> 当前权限、固定分享与回收站规则以 [PERMISSIONS.md](PERMISSIONS.md) 为准，旧版本描述不再作为鉴权依据。
+
 # 路由速查
 
 路由实现位于 `internal/handler`，每条注册语句前有简短说明；`internal/router` 统一组装公开、登录与可选登录路由组。
@@ -21,7 +23,6 @@
 | DELETE   | `/api/document/:fileKey/shares/:id`            | 项目管理员或分享创建者撤销链接。                                                         | `internal/handler/shares.go`    |
 | GET      | `/api/shared-file`                             | 持有效分享令牌的匿名或登录用户读取指定文档。                                             | `internal/handler/shares.go`    |
 | HEAD     | `/api/shared-file`                             | 校验有效分享令牌后返回文档响应头。                                                       | `internal/handler/shares.go`    |
-| PUT      | `/api/shared-file`                             | 具备编辑能力的链接持有者按版本号保存正文。                                               | `internal/handler/shares.go`    |
 | GET      | `/api/shared-file/attachments/:hash`           | 持有效分享令牌的用户读取该文档附件。                                                     | `internal/handler/shares.go`    |
 | HEAD     | `/api/shared-file/attachments/:hash`           | 校验分享令牌后读取附件响应头。                                                           | `internal/handler/shares.go`    |
 | GET      | `/api/shared-file/creator-avator`              | 持有效分享令牌的用户读取该文档创建者头像。                                               | `internal/handler/shares.go`    |
@@ -99,3 +100,5 @@
 - 删除附件关联不会删除共享的本地哈希文件；物理文件没有自动孤儿清理任务。本次不调整目录层级限制或数据库结构。
 
 本地存储切换不迁移历史 R2 数据、不回退读取 R2，也不删除远端对象。仅当数据库元数据与本地文件均存在且权限有效时提供文件内容；缺失文件继续返回不存在。原权限、分享撤销、HEAD / Range 与错误响应约定不因存储介质改变而放宽。
+
+`PUT /api/shared-file` 已移除；分享凭证只用于读取与登录后的文件授权。正文修改使用受登录保护的 `PUT /api/document/:fileKey`，并检查账号文件写权限及 revision。

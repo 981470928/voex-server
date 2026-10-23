@@ -1,3 +1,5 @@
+> 当前权限、固定分享与回收站规则以 [PERMISSIONS.md](PERMISSIONS.md) 为准，旧版本描述不再作为鉴权依据。
+
 # Teams and sharing (experimental)
 
 Current contract: users join multiple teams as owner/admin/member. Each user has exactly one personal team, created transactionally with registration. Personal teams allow members and projects, but cannot be deleted or transferred; their owner cannot leave.

@@ -16,8 +16,11 @@ func (s *Service) ProjectPermissions(db *gorm.DB, ctx context.Context, key strin
 	userID := shared.String(identity.User(ctx)["id"])
 	row := repository.WorkspaceProjectPermission(db, userID, key)
 	manager := row != nil && shared.String(row["user_id"]) != "" && (shared.String(row["owner_id"]) == userID || shared.String(row["role"]) == "admin")
-	edit := row != nil && shared.String(row["user_id"]) != "" && (manager || shared.String(shared.Policy(row["privileges"])["mode"]) == "inherit" || shared.Bool(row["explicit_member"]))
-	return shared.Row{"read": edit, "write": edit, "manage": manager, "share": edit}
+	member := row != nil && shared.String(row["user_id"]) != ""
+	edit := member && (manager || shared.Bool(row["explicit_member"]))
+	owner := member && shared.String(row["owner_id"]) == userID
+	return shared.Row{"read": member, "write": edit, "manage": manager, "share": edit, "remove": owner, "children_remove": edit}
+
 }
 
 func (s *Service) RequireProject(db *gorm.DB, ctx context.Context, key, action string) shared.Row {
@@ -115,6 +118,7 @@ func (s *Service) InitializeWorkspace(ctx context.Context, teamKey string) []sha
 func (s *Service) CreateProject(ctx context.Context, name, teamKey string) shared.Row {
 	return s.tx(ctx, true, func(db *gorm.DB) any {
 		team := s.SelectedTeam(db, ctx, teamKey)
+		s.teamRow(db, ctx, shared.String(team["team_key"]), true)
 		project := workspaceInsertProject(db, name, shared.String(identity.User(ctx)["id"]), team["id"])
 		workspaceEnsureRoot(db, project["id"])
 		return projectDTO(project, s.RequireProject(db, ctx, shared.String(project["project_key"]), "write"))
@@ -133,11 +137,10 @@ func (s *Service) RenameProject(ctx context.Context, key, name string) {
 func (s *Service) DeleteProject(ctx context.Context, key string, cascade bool) {
 	s.tx(ctx, true, func(db *gorm.DB) any {
 		project := workspaceFindProject(db, key)
-		s.RequireProject(db, ctx, key, "write")
+		s.RequireProject(db, ctx, key, "remove")
 		if !cascade && repository.WorkspaceProjectHasFolders(db, project["id"]) {
 			shared.Fail(409, "项目中有子项，请确认连同所有子项一起删除")
 		}
-		s.requireFolderDocumentDeletion(db, ctx, project["id"], nil)
 		repository.WorkspaceDeleteProject(db, project["id"])
 		return nil
 	})
@@ -208,7 +211,6 @@ func (s *Service) DeleteFolder(ctx context.Context, key string, cascade bool) {
 		}
 
 		userID := shared.String(identity.User(ctx)["id"])
-		s.requireFolderDocumentDeletion(db, ctx, project["id"], folder["id"])
 		repository.WorkspaceTrashFolder(db, folder["id"], userID)
 		return nil
 	})
@@ -234,8 +236,8 @@ func (s *Service) SetProjectPrivileges(ctx context.Context, key string, modeValu
 		project := workspaceFindProject(db, key)
 		s.RequireProject(db, ctx, key, "manage")
 		mode, isString := modeValue.(string)
-		if !isString || (mode != "inherit" && mode != "restricted") {
-			shared.Fail(400, "请选择继承团队或指定成员")
+		if !isString || mode != "restricted" {
+			shared.Fail(400, "请使用指定项目编辑成员列表")
 		}
 		ids, valid := idsValue.([]any)
 		if !valid || len(ids) > 1000 {
@@ -291,10 +293,16 @@ func (s *Service) workspaceDocumentLocation(db *gorm.DB, ctx context.Context, pr
 			project = workspaceFindProject(db, projectKey)
 		} else {
 			team := s.SelectedTeam(db, ctx, teamKey)
-			visible := s.workspaceListProjects(db, ctx, shared.String(team["team_key"]))
+			visible := []shared.Row{}
+			for _, candidate := range s.workspaceListProjects(db, ctx, shared.String(team["team_key"])) {
+				if shared.Bool(candidate["permissions"].(shared.Row)["write"]) {
+					visible = append(visible, candidate)
+				}
+			}
 			if len(visible) != 0 {
 				project = workspaceFindProject(db, shared.String(visible[0]["project_key"]))
 			} else {
+				s.teamRow(db, ctx, shared.String(team["team_key"]), true)
 				project = workspaceInsertProject(db, "默认项目", shared.String(identity.User(ctx)["id"]), team["id"])
 			}
 		}

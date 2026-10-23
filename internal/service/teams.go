@@ -41,7 +41,7 @@ func teamDTO(row shared.Row) shared.Row {
 		"team_key": row["team_key"], "team_code": row["team_code"], "name": row["name"],
 		"kind": kind, "role": role, "owner_id": row["owner_id"], "member_count": count,
 		"created_at": shared.Timestamp(row["created_at"]), "privileges": shared.Row{"mode": "members"},
-		"permissions": shared.Row{"read": true, "write": true, "manage": role == "owner" || role == "admin", "transfer": ownerStandard, "delete": ownerStandard},
+		"permissions": shared.Row{"read": true, "write": true, "create_project": role == "owner" || role == "admin", "manage": role == "owner" || role == "admin", "transfer": ownerStandard, "delete": ownerStandard},
 	}
 }
 

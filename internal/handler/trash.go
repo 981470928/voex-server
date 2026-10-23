@@ -10,6 +10,8 @@ import (
 
 func (h *Handler) RegisterTrashRoutes(protected *gin.RouterGroup) {
 	group := protected.Group("/trash")
+	group.POST("/restore-all", h.trashRestoreAll)
+	group.DELETE("", h.trashClear)
 
 	// POST /api/trash/:type/:key/restore：恢复文档或文件夹，需要登录及项目写权限。
 	group.POST("/:type/:key/restore", h.trashRestore)
@@ -88,4 +90,13 @@ func (h *Handler) trashPurge(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, shared.Row{"success": true})
+}
+
+func (h *Handler) trashRestoreAll(c *gin.Context) {
+	h.Service.BulkTrash(c.Request.Context(), c.Query("team_key"), c.Query("project_key"), true)
+	c.JSON(200, shared.Row{"success": true})
+}
+func (h *Handler) trashClear(c *gin.Context) {
+	h.Service.BulkTrash(c.Request.Context(), c.Query("team_key"), c.Query("project_key"), false)
+	c.JSON(200, shared.Row{"success": true})
 }

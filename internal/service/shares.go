@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"math"
 	"regexp"
 	"strconv"
-	"time"
+	"strings"
 
 	"gorm.io/gorm"
 	"voex-server/internal/filestore"
@@ -15,24 +18,36 @@ import (
 	"voex-server/internal/shared"
 )
 
-var shareTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 var shareAvatarPattern = regexp.MustCompile(`^/api/assets/([a-f0-9-]{36})$`)
 var shareAvatarStoragePattern = regexp.MustCompile(`^[a-f0-9-]{36}(\.webp)?$`)
 
+func (s *Service) shareToken(key, mode string) string {
+	payload := "v1." + key + "." + mode
+	mac := hmac.New(sha256.New, s.shareSecret)
+	mac.Write([]byte("voex-file-share:" + payload))
+	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
 func (s *Service) sharedDocument(db *gorm.DB, ctx context.Context, token string) (shared.Row, shared.Row) {
-	if !shareTokenPattern.MatchString(token) {
-		shared.Fail(404, "分享链接无效或已撤销")
+	parts := strings.Split(token, ".")
+	if len(parts) != 4 || parts[0] != "v1" || (parts[2] != "read" && parts[2] != "edit") || !hmac.Equal([]byte(token), []byte(s.shareToken(parts[1], parts[2]))) {
+		shared.Fail(404, "分享链接无效")
 	}
-	doc := repository.ActiveSharedDocument(db, shared.Digest(token))
+	doc := repository.DocumentByKey(db, parts[1], true)
 	if doc == nil {
-		shared.Fail(404, "分享链接无效或已撤销")
+		shared.Fail(404, "文件不存在")
 	}
-	write := shared.String(doc["permission"]) == "edit"
+	settings := repository.DocumentSharing(db, doc["id"])
+	enabled := shared.Bool(settings[parts[2]+"_enabled"])
+	access := shared.Row{"read": false, "write": false}
 	if identity.OptionalUser(ctx) != nil {
-		permissions := s.DocumentPermissions(db, ctx, doc)
-		write = write || shared.Bool(permissions["write"])
+		access = s.DocumentPermissions(db, ctx, doc)
 	}
-	return doc, shared.Row{"read": true, "write": write, "manage": false, "share": false}
+	if !enabled && !shared.Bool(access["read"]) {
+		shared.Fail(403, "你没有权限")
+	}
+	doc["share_permission"] = parts[2]
+	doc["share_enabled"] = enabled
+	return doc, shared.Row{"read": true, "write": shared.Bool(access["write"]) || (enabled && parts[2] == "edit"), "manage": false, "share": false}
 }
 
 func shareRevision(value any) (int64, bool) {
@@ -55,51 +70,56 @@ func shareRevision(value any) (int64, bool) {
 	return int64(number), true
 }
 
-func (s *Service) ListDocumentShares(ctx context.Context, rawKey string) []shared.Row {
-	key := shared.Key(rawKey, "文件标识")
+func (s *Service) DocumentSharing(ctx context.Context, key string) shared.Row {
 	return s.tx(ctx, false, func(db *gorm.DB) any {
 		doc := s.FindDocument(db, ctx, key, "share", false)
-		permissions := s.DocumentPermissions(db, ctx, doc)
-		rows := repository.ListDocumentShares(db, doc["id"])
-		result := make([]shared.Row, 0, len(rows))
-		for _, row := range rows {
-			var revoked any
-			if row["revoked_at"] != nil {
-				revoked = shared.Timestamp(row["revoked_at"])
-			}
-			result = append(result, shared.Row{"id": row["id"], "permission": row["permission"], "created_at": shared.Timestamp(row["created_at"]), "revoked_at": revoked, "created_by": shared.Row{"id": row["creator_id"], "name": row["name"], "avator": row["avator"]}, "can_revoke": shared.Bool(permissions["manage"]) || shared.String(row["creator_id"]) == shared.String(identity.User(ctx)["id"])})
+		manage := shared.Bool(s.ProjectPermissions(db, ctx, shared.String(doc["project_key"]))["write"])
+		settings := repository.DocumentSharing(db, doc["id"])
+		links := []shared.Row{}
+		for _, mode := range []string{"read", "edit"} {
+			links = append(links, shared.Row{"permission": mode, "token": s.shareToken(key, mode), "enabled": shared.Bool(settings[mode+"_enabled"])})
 		}
-		return result
-	}).([]shared.Row)
-}
-
-func (s *Service) CreateDocumentShare(ctx context.Context, rawKey string, input shared.Row) shared.Row {
-	permission := input["permission"]
-	if permission != "read" && permission != "edit" {
-		shared.Fail(400, "分享权限只能为只读或编辑")
-	}
-	key := shared.Key(rawKey, "文件标识")
-	return s.tx(ctx, true, func(db *gorm.DB) any {
-		doc := s.FindDocument(db, ctx, key, "share", false)
-		id, token := shared.UUID(), shared.RandomToken(32)
-		repository.CreateDocumentShare(db, shared.Row{"id": id, "document_id": doc["id"], "token_hash": shared.Digest(token), "permission": permission, "created_by": identity.User(ctx)["id"]})
-		return shared.Row{"id": id, "token": token, "permission": permission, "created_at": shared.Timestamp(time.Now().UTC())}
+		access := []shared.Row{}
+		if manage {
+			for _, row := range repository.DocumentAccessList(db, doc["id"]) {
+				userCtx := identity.WithUser(ctx, shared.Row{"id": row["user_id"]}, "")
+				project := s.ProjectPermissions(db, userCtx, shared.String(doc["project_key"]))
+				if shared.Bool(project["write"]) {
+					continue
+				}
+				member := shared.Bool(project["read"])
+				if member && shared.String(row["permission"]) != "edit" {
+					continue
+				}
+				row["member"] = member
+				access = append(access, row)
+			}
+		}
+		return shared.Row{"links": links, "can_manage": manage, "access": access}
 	}).(shared.Row)
 }
-
-func (s *Service) RevokeDocumentShare(ctx context.Context, rawKey, id string) {
-	key := shared.Key(rawKey, "文件标识")
+func (s *Service) SetDocumentSharing(ctx context.Context, key string, input shared.Row) {
+	mode := shared.String(input["permission"])
+	enabled, ok := input["enabled"].(bool)
+	if !ok || (mode != "read" && mode != "edit") || len(input) != 2 {
+		shared.Fail(400, "请选择分享类型与开关状态")
+	}
 	s.tx(ctx, true, func(db *gorm.DB) any {
-		doc := s.FindDocument(db, ctx, key, "share", false)
-		share := repository.DocumentShareByID(db, doc["id"], id)
-		if share == nil {
-			shared.Fail(404, "分享记录不存在")
+		doc := s.FindDocument(db, ctx, key, "manage", false)
+		repository.SetDocumentSharing(db, doc["id"], mode, enabled)
+		return nil
+	})
+}
+func (s *Service) RevokeDocumentAccess(ctx context.Context, key, userID string) {
+	s.tx(ctx, true, func(db *gorm.DB) any {
+		doc := s.FindDocument(db, ctx, key, "manage", false)
+		target := identity.WithUser(ctx, shared.Row{"id": userID}, "")
+		project := s.ProjectPermissions(db, target, shared.String(doc["project_key"]))
+		grant := repository.DocumentAccess(db, doc["id"], userID)
+		if shared.Bool(project["write"]) || (shared.Bool(project["read"]) && grant != "edit") {
+			shared.Fail(403, "不能在此取消团队或项目权限")
 		}
-		permissions := s.DocumentPermissions(db, ctx, doc)
-		if !shared.Bool(permissions["manage"]) && shared.String(share["created_by"]) != shared.String(identity.User(ctx)["id"]) {
-			shared.Fail(403, "只能撤销自己创建的分享")
-		}
-		repository.RevokeDocumentShare(db, id)
+		repository.RemoveDocumentAccess(db, doc["id"], userID)
 		return nil
 	})
 }
@@ -120,7 +140,11 @@ func (s *Service) GetSharedDocument(ctx context.Context, token string, recordVis
 	return s.tx(ctx, recordVisit, func(db *gorm.DB) any {
 		doc, permissions := s.sharedDocument(db, ctx, token)
 		if recordVisit {
-			repository.GrantDocumentAccess(db, doc["id"], shared.String(user["id"]), shared.String(doc["permission"]))
+			existing := s.DocumentPermissions(db, ctx, doc)
+			mode := shared.String(doc["share_permission"])
+			if shared.Bool(doc["share_enabled"]) && !shared.Bool(existing["write"]) && (mode == "edit" || !shared.Bool(existing["read"])) {
+				repository.GrantDocumentAccess(db, doc["id"], shared.String(user["id"]), mode)
+			}
 			repository.RecordRecentFile(db, shared.String(user["id"]), doc)
 		}
 		avator := ""
@@ -138,22 +162,6 @@ func sharedContentInput(input shared.Row) (string, int64) {
 		shared.Fail(400, "分享编辑仅允许提交正文和版本号")
 	}
 	return content, version
-}
-
-func (s *Service) UpdateSharedDocument(ctx context.Context, token string, input shared.Row) shared.Row {
-	content, version := sharedContentInput(input)
-	revision := s.tx(ctx, true, func(db *gorm.DB) any {
-		doc, permissions := s.sharedDocument(db, ctx, token)
-		if !shared.Bool(permissions["write"]) {
-			shared.Fail(403, "此分享链接只有只读权限")
-		}
-		if version != shared.Int64(doc["revision"]) {
-			shared.Fail(409, "文件已被其他人修改，请保留本地内容后重新加载")
-		}
-		repository.UpdateSharedContent(db, doc["id"], content, shared.String(identity.OptionalUser(ctx)["id"]))
-		return shared.Int64(doc["revision"]) + 1
-	})
-	return shared.Row{"success": true, "revision": revision}
 }
 
 func (s *Service) SharedAttachment(ctx context.Context, token, hash string) filestore.Download {

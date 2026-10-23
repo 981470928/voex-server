@@ -2,27 +2,22 @@ package repository
 
 import (
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"voex-server/internal/shared"
 )
 
-func ActiveSharedDocument(db *gorm.DB, tokenHash string) shared.Row {
-	return One(DocumentQuery(db, true).Select(DocumentColumns+",d.file_content,s.permission,s.id AS share_id").Joins("JOIN file_shares s ON s.document_id=d.id").Where("s.token_hash=? AND s.revoked_at IS NULL", tokenHash))
+func DocumentSharing(db *gorm.DB, id any) shared.Row {
+	return One(db.Table("document_sharing").Where("document_id=?", id))
 }
-
-func ListDocumentShares(db *gorm.DB, documentID any) []shared.Row {
-	return Rows(db.Table("file_shares AS s").Select("s.id,s.permission,s.created_at,s.revoked_at,u.id AS creator_id,u.name,u.avator").Joins("JOIN users u ON u.id=s.created_by").Where("s.document_id=?", documentID).Order("s.created_at DESC,s.id"))
+func SetDocumentSharing(db *gorm.DB, id any, mode string, enabled bool) {
+	field := mode + "_enabled"
+	Must(db.Table("document_sharing").Clauses(clause.OnConflict{DoUpdates: clause.Assignments(map[string]any{field: enabled})}).Create(map[string]any{"document_id": id, field: enabled}))
 }
-
-func CreateDocumentShare(db *gorm.DB, share shared.Row) {
-	Must(db.Table("file_shares").Create(map[string]any(share)))
+func DocumentAccessList(db *gorm.DB, id any) []shared.Row {
+	return Rows(db.Table("document_access AS a").Select("a.user_id,a.permission,u.name").Joins("JOIN users u ON u.id=a.user_id").Where("a.document_id=?", id).Order("a.granted_at,a.user_id"))
 }
-
-func DocumentShareByID(db *gorm.DB, documentID any, id string) shared.Row {
-	return One(db.Table("file_shares").Select("created_by").Where("id=? AND document_id=?", id, documentID))
-}
-
-func RevokeDocumentShare(db *gorm.DB, id string) {
-	Must(db.Table("file_shares").Where("id=?", id).Update("revoked_at", gorm.Expr("COALESCE(revoked_at,CURRENT_TIMESTAMP())")))
+func RemoveDocumentAccess(db *gorm.DB, id any, user string) {
+	Must(db.Table("document_access").Where("document_id=? AND user_id=?", id, user).Delete(&map[string]any{}))
 }
 
 func ListSharedAttachments(db *gorm.DB, fileKey string) []shared.Row {

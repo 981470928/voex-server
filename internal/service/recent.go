@@ -17,10 +17,6 @@ func (s *Service) recentPermissions(db *gorm.DB, ctx context.Context, doc, proje
 	if shared.Bool(project["read"]) {
 		return permissions, "project"
 	}
-	permission := shared.String(doc["share_permission"])
-	if permission == "read" || permission == "edit" {
-		permissions["read"] = true
-	}
 	access := "unavailable"
 	if shared.Bool(permissions["read"]) {
 		access = "share"

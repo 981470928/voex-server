@@ -76,7 +76,7 @@ func WorkspaceFirstRoot(db *gorm.DB, projectID any) shared.Row {
 func WorkspaceInsertProject(db *gorm.DB, key, name, creatorID string, teamID any) shared.Row {
 	Must(db.Table("projects").Create(map[string]any{
 		"project_key": key, "name": name, "creator_id": creatorID,
-		"team_id": teamID, "privileges": `{"mode":"inherit"}`,
+		"team_id": teamID, "privileges": `{"mode":"restricted"}`,
 	}))
 	return WorkspaceProjectByKey(db, key)
 }

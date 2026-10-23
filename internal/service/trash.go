@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"voex-server/internal/identity"
 	"voex-server/internal/repository"
 	"voex-server/internal/shared"
 
@@ -16,7 +17,7 @@ func (s *Service) RestoreFolder(ctx context.Context, key string) {
 			shared.Fail(404, "文件夹不存在")
 		}
 
-		s.RequireProject(db, ctx, shared.String(folder["project_key"]), "write")
+		s.requireTrashAction(db, ctx, folder)
 
 		if folder["deleted_at"] == nil {
 			shared.Fail(409, "文件夹不在回收站中")
@@ -38,7 +39,7 @@ func (s *Service) RestoreDocument(ctx context.Context, key string) {
 			shared.Fail(404, "文档不存在")
 		}
 
-		s.RequireProject(db, ctx, shared.String(document["project_key"]), "write")
+		s.requireTrashAction(db, ctx, document)
 
 		if document["deleted_at"] == nil {
 			shared.Fail(409, "文档不在回收站中")
@@ -73,6 +74,8 @@ func (s *Service) ListTrash(
 		team := s.SelectedTeam(db, ctx, teamKey)
 		projects := repository.WorkspaceProjects(db, team["id"])
 		projectIDs := make([]int64, 0, len(projects))
+		manage := shared.String(team["role"]) != "member"
+		writes := map[string]bool{}
 
 		for _, project := range projects {
 			key := shared.String(project["project_key"])
@@ -81,7 +84,8 @@ func (s *Service) ListTrash(
 			}
 
 			permissions := s.ProjectPermissions(db, ctx, key)
-			if shared.Bool(permissions["write"]) {
+			writes[key] = shared.Bool(permissions["write"])
+			if shared.Bool(permissions["read"]) {
 				projectIDs = append(projectIDs, shared.Int64(project["id"]))
 			}
 		}
@@ -90,7 +94,11 @@ func (s *Service) ListTrash(
 			shared.Fail(404, "项目不存在或没有访问权限")
 		}
 
-		rows, total := repository.TrashList(db, projectIDs, limit, offset)
+		deletedBy := ""
+		if !manage {
+			deletedBy = shared.String(identity.User(ctx)["id"])
+		}
+		rows, total := repository.TrashList(db, projectIDs, deletedBy, limit, offset)
 		items := make([]shared.Row, 0, len(rows))
 
 		for _, row := range rows {
@@ -112,7 +120,8 @@ func (s *Service) ListTrash(
 				"deleted_by":  deletedBy,
 				"deleted_at":  shared.Timestamp(row["deleted_at"]),
 				"expires_at":  shared.Timestamp(row["expires_at"]),
-				"can_restore": shared.Bool(row["can_restore"]),
+				"can_restore": shared.Bool(row["can_restore"]) && writes[shared.String(row["project_key"])],
+				"can_purge":   writes[shared.String(row["project_key"])],
 			}
 
 			if shared.String(row["item_type"]) == "folder" {
@@ -123,10 +132,11 @@ func (s *Service) ListTrash(
 		}
 
 		return shared.Row{
-			"items":  items,
-			"total":  total,
-			"limit":  limit,
-			"offset": offset,
+			"can_manage_all": manage,
+			"items":          items,
+			"total":          total,
+			"limit":          limit,
+			"offset":         offset,
 		}
 	}).(shared.Row)
 }
@@ -139,9 +149,7 @@ func (s *Service) PurgeDocument(ctx context.Context, key string) {
 		if document == nil {
 			shared.Fail(404, "文档不存在")
 		}
-		if !shared.Bool(s.DocumentPermissions(db, ctx, document)["remove"]) {
-			shared.Fail(403, "只有创建者可以删除文件")
-		}
+		s.requireTrashAction(db, ctx, document)
 		if document["deleted_at"] == nil {
 			shared.Fail(409, "文档不在回收站中")
 		}
@@ -158,13 +166,56 @@ func (s *Service) PurgeFolder(ctx context.Context, key string) {
 		if folder == nil {
 			shared.Fail(404, "文件夹不存在")
 		}
-		s.RequireProject(db, ctx, shared.String(folder["project_key"]), "write")
+		s.requireTrashAction(db, ctx, folder)
 		if folder["deleted_at"] == nil {
 			shared.Fail(409, "文件夹不在回收站中")
 		}
 
-		s.requireFolderDocumentDeletion(db, ctx, folder["project_id"], folder["id"])
 		repository.WorkspaceDeleteFolder(db, folder["project_id"], folder["id"])
+		return nil
+	})
+}
+
+func (s *Service) requireTrashAction(db *gorm.DB, ctx context.Context, row shared.Row) {
+	project := s.ProjectPermissions(db, ctx, shared.String(row["project_key"]))
+	if !shared.Bool(project["read"]) || (!shared.Bool(project["manage"]) && shared.String(row["deleted_by"]) != shared.String(identity.User(ctx)["id"])) {
+		shared.Fail(404, "回收站记录不存在或没有访问权限")
+	}
+	if !shared.Bool(project["write"]) {
+		shared.Fail(403, "需要当前项目编辑权限")
+	}
+}
+func (s *Service) BulkTrash(ctx context.Context, teamKey, projectKey string, restore bool) {
+	s.tx(ctx, true, func(db *gorm.DB) any {
+		team := s.SelectedTeam(db, ctx, teamKey)
+		s.teamRow(db, ctx, shared.String(team["team_key"]), true)
+		ids := []int64{}
+		for _, p := range repository.WorkspaceProjects(db, team["id"]) {
+			if projectKey == "" || projectKey == shared.String(p["project_key"]) {
+				ids = append(ids, shared.Int64(p["id"]))
+			}
+		}
+		if projectKey != "" && len(ids) == 0 {
+			shared.Fail(404, "项目不属于当前团队")
+		}
+		folders := repository.AllTrashFolders(db, ids)
+		if restore {
+			for _, f := range folders {
+				repository.TrashRestoreFolder(db, f["id"])
+			}
+			for _, d := range repository.AllTrashDocuments(db, ids) {
+				if d["folder_deleted_at"] == nil {
+					repository.TrashRestoreDocument(db, d["id"])
+				}
+			}
+		} else {
+			for _, d := range repository.AllTrashDocuments(db, ids) {
+				repository.WorkspaceDeleteDocument(db, d["id"], shared.String(d["file_key"]))
+			}
+			for _, f := range folders {
+				repository.WorkspaceDeleteFolder(db, f["project_id"], f["id"])
+			}
+		}
 		return nil
 	})
 }

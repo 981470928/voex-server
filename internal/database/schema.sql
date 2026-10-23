@@ -240,6 +240,13 @@ CREATE TABLE `documents` (
   CONSTRAINT `fk_documents_deleted_by` FOREIGN KEY (`deleted_by`) REFERENCES `users` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `document_sharing` (
+ `document_id` int NOT NULL PRIMARY KEY,
+ `read_enabled` boolean NOT NULL DEFAULT false,
+ `edit_enabled` boolean NOT NULL DEFAULT false,
+ CONSTRAINT `fk_document_sharing_document` FOREIGN KEY (`document_id`) REFERENCES `documents` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `document_access` (
   `document_id` int NOT NULL,
   `user_id` char(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
