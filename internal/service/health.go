@@ -15,5 +15,8 @@ func (s *Service) Readiness(ctx context.Context) error {
 		return err
 	}
 	_, err = os.Stat(config.Env("VOEX_STORAGE_ROOT", "/home/static"))
-	return err
+	if err != nil {
+		return err
+	}
+	return s.CollaborationReady(ctx)
 }

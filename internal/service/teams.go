@@ -172,7 +172,7 @@ func (s *Service) UpdateTeam(ctx context.Context, key string, value any) shared.
 }
 
 func (s *Service) DeleteTeam(ctx context.Context, key string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", "", func(db *gorm.DB) any {
 		team := s.teamRow(db, ctx, key, true)
 		if shared.String(team["role"]) != "owner" {
 			shared.Fail(403, "只有所有者可以删除团队")
@@ -189,7 +189,7 @@ func (s *Service) DeleteTeam(ctx context.Context, key string) {
 }
 
 func (s *Service) TransferTeam(ctx context.Context, key string, value any) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", "", func(db *gorm.DB) any {
 		team := s.teamRow(db, ctx, key, true)
 		if shared.String(team["role"]) != "owner" || shared.String(team["kind"]) == "personal" {
 			shared.Fail(403, "仅普通团队的所有者可以转让团队")
@@ -219,7 +219,7 @@ func (s *Service) TeamMembers(ctx context.Context, key string) []shared.Row {
 }
 
 func (s *Service) UpdateTeamMember(ctx context.Context, key, userID string, value any) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", "", func(db *gorm.DB) any {
 		team := s.teamRow(db, ctx, key, true)
 		if shared.String(team["role"]) != "owner" {
 			shared.Fail(403, "只有所有者可以设置管理员")
@@ -240,7 +240,7 @@ func (s *Service) UpdateTeamMember(ctx context.Context, key, userID string, valu
 }
 
 func (s *Service) RemoveTeamMember(ctx context.Context, key, userID string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", "", func(db *gorm.DB) any {
 		team := s.teamRow(db, ctx, key, false)
 		actorID := shared.String(identity.User(ctx)["id"])
 		if userID == "me" {

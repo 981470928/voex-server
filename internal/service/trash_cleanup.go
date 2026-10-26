@@ -27,7 +27,11 @@ func (s *Service) cleanupTrashItem(
 	defer cancel()
 
 	deleted = s.tx(itemCtx, true, func(db *gorm.DB) any {
-		return purge(db, id)
+		removed := purge(db, id)
+		if removed && s.collabSchema {
+			repository.CollaborationEvent(db, "deleted", "")
+		}
+		return removed
 	}).(bool)
 
 	return deleted, nil

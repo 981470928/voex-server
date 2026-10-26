@@ -29,3 +29,5 @@ func User(ctx context.Context) shared.Row {
 	}
 	return u
 }
+
+func SessionID(ctx context.Context) string { v, _ := ctx.Value(contextKey{}).(Session); return v.ID }

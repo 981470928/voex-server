@@ -89,6 +89,10 @@ pm2 save
 
 该操作保留现有数据库、上传内容和登录密钥；源码恢复需另行核对归档或 Git 版本。
 
+## 多人协同
+
+协同能力通过独立 Node/Hocuspocus 进程接入，Go 保留权限与 MySQL 事务；默认关闭。开启前需显式执行协同 SQL 并配置服务间密钥和浏览器 Origin。构建、原生进程配置、Nginx 与更新恢复步骤见 [多人协同](docs/COLLABORATION.md)。
+
 ## 许可证
 
 本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。

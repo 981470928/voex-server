@@ -13,13 +13,16 @@ import (
 )
 
 type Service struct {
-	db             *gorm.DB
-	secret         []byte
-	shareSecret    []byte
-	hashSlots      chan struct{}
-	dummyHash      string
-	recentCleanups sync.Map
-	Files          *filestore.Store
+	collab           *collaborationRuntime
+	collabSchema     bool
+	collabModeColumn bool
+	db               *gorm.DB
+	secret           []byte
+	shareSecret      []byte
+	hashSlots        chan struct{}
+	dummyHash        string
+	recentCleanups   sync.Map
+	Files            *filestore.Store
 }
 
 func New(db *gorm.DB, files *filestore.Store, secret []byte) *Service {

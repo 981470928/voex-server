@@ -47,3 +47,7 @@ Go 服务通过 GORM / `gorm.io/driver/mysql` 访问 MySQL 8，驱动版本固�
 `document_access` 按 document_id + user_id 保存 read/edit，外键随文件或账号删除清理。登录用户打开有效分享链接时幂等写入，只能从 read 升级 edit，后续只读链接不能降级。授权独立于 recent_files 和 file_shares，历史清理或链接撤销不撤销已有权限。
 
 已有环境部署前显式执行 `internal/database/document-access.sql`；该脚本创建新表，并从仍有效的已访问分享记录回填授权，重复执行不会把 edit 降为 read。新环境的 schema.sql 已包含此表。运行时仍不自动执行 DDL。
+
+## 协同正文
+
+可选协同模块新增 documents.content_mode、document_collaboration（二进制当前状态）、collaboration_commits（7 天提交幂等回执）与 collaboration_outbox（事务事件）。已有库先备份停写，再显式执行 collaboration.sql；空库 schema.sql 已包含新结构。Yjs 状态与 Markdown 投影、revision 在同一事务提交；详情见 [多人协同](COLLABORATION.md)。

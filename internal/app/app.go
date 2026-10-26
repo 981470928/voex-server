@@ -66,8 +66,14 @@ func Run() (err error) {
 	// 从 cfg.SecretFile 加载 JWT 签名密钥，文件不存在时创建密钥。
 	// 将数据库、文件存储和密钥注入业务服务。
 	business := service.New(db, files, security.LoadSecret(cfg.SecretFile))
+	if err := business.ConfigureCollaboration(cfg.Collaboration); err != nil {
+		return err
+	}
 
 	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
+	collaborationDone := make(chan struct{})
+	go func() { defer close(collaborationDone); business.RunCollaborationEvents(cleanupCtx) }()
+	defer func() { cancelCleanup(); <-collaborationDone }()
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)

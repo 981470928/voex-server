@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"voex-server/internal/identity"
 	"voex-server/internal/shared"
-	"voex-server/internal/transport"
 )
 
 func (h *Handler) RegisterRecentRoutes(protected *gin.RouterGroup) {
@@ -17,8 +16,6 @@ func (h *Handler) RegisterRecentRoutes(protected *gin.RouterGroup) {
 	group.Match([]string{http.MethodGet, http.MethodHead}, "/:fileKey", h.recentGet)
 	// GET/HEAD：重新检查当前授权，仅返回文件详情，不记录访问。
 	group.Match([]string{http.MethodGet, http.MethodHead}, "/:fileKey/details", h.recentDetails)
-	// PUT：仅允许有编辑权限的用户按版本号保存正文。
-	group.PUT("/:fileKey", h.recentUpdate)
 	// DELETE：仅删除本人的查看记录，不修改文档、附件或分享。
 	group.DELETE("/:fileKey", h.recentRemove)
 	// GET/HEAD：独立校验当前文件权限后下载其附件。
@@ -50,11 +47,6 @@ func (h *Handler) recentGet(c *gin.Context) {
 func (h *Handler) recentDetails(c *gin.Context) {
 	key := shared.Key(c.Param("fileKey"), "文件标识")
 	c.JSON(http.StatusOK, h.Service.GetRecentFileDetails(c.Request.Context(), key))
-}
-
-func (h *Handler) recentUpdate(c *gin.Context) {
-	key := shared.Key(c.Param("fileKey"), "文件标识")
-	c.JSON(http.StatusOK, h.Service.UpdateRecentFile(c.Request.Context(), key, transport.Body(c)))
 }
 
 func (h *Handler) recentRemove(c *gin.Context) {

@@ -96,7 +96,7 @@ func (s *Service) Login(ctx context.Context, input shared.Row, previousRefresh s
 	if row == nil || !valid {
 		shared.Fail(401, "账号或密码不正确")
 	}
-	return s.tx(ctx, false, func(tx *gorm.DB) any {
+	return s.txEvent(ctx, "permissions", "", func(tx *gorm.DB) any {
 		if previousRefresh != "" {
 			repository.AuthRevokeRefresh(tx, shared.Digest(previousRefresh))
 		}
@@ -114,13 +114,15 @@ func (s *Service) Refresh(ctx context.Context, token string) Session {
 	return s.issueAccess(userDTO(row), shared.String(row["session_id"]))
 }
 func (s *Service) Logout(ctx context.Context, access, refresh string) {
-	db := s.db.WithContext(ctx)
-	if p, ok := s.verifyAccess(access, true); ok {
-		repository.AuthRevokeAccess(db, shared.String(p["sid"]), shared.String(p["sub"]))
-	}
-	if refresh != "" {
-		repository.AuthRevokeRefresh(db, shared.Digest(refresh))
-	}
+	s.txEvent(ctx, "permissions", "", func(db *gorm.DB) any {
+		if p, ok := s.verifyAccess(access, true); ok {
+			repository.AuthRevokeAccess(db, shared.String(p["sid"]), shared.String(p["sub"]))
+		}
+		if refresh != "" {
+			repository.AuthRevokeRefresh(db, shared.Digest(refresh))
+		}
+		return nil
+	})
 }
 func (s *Service) UpdateProfile(ctx context.Context, input shared.Row) shared.Row {
 	user := identity.User(ctx)

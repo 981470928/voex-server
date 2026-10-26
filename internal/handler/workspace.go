@@ -232,27 +232,18 @@ func (h *Handler) workspaceGetDocumentDetails(c *gin.Context) {
 	c.JSON(http.StatusOK, h.Service.GetDocumentDetails(c.Request.Context(), key))
 }
 
+// 普通 HTTP 更新仅负责重命名，正文统一由协同连接保存。
 func (h *Handler) workspaceUpdateDocument(c *gin.Context) {
 	key := shared.Key(c.Param("fileKey"), "文档标识")
 	body := transport.Body(c)
-	changes := shared.Row{}
-	if value, present := body["file_name"]; present {
-		changes["file_name"] = shared.Name(value, "文档名称")
+	if _, present := body["file_content"]; present {
+		shared.Fail(http.StatusBadRequest, "正文请通过协同连接保存")
 	}
-	content, hasContent := body["file_content"]
-	if hasContent {
-		if content != nil {
-			if _, valid := content.(string); !valid {
-				shared.Fail(400, "文档内容必须是字符串或 null")
-			}
-		}
-		changes["file_content"] = content
+	value, present := body["file_name"]
+	if !present {
+		shared.Fail(http.StatusBadRequest, "请提供文档名称")
 	}
-	if len(changes) == 0 {
-		shared.Fail(400, "请提供文档名称或文档内容")
-	}
-	input := service.UpdateDocumentInput{Changes: changes, HasContent: hasContent, Revision: body["revision"]}
-	revision := h.Service.UpdateDocument(c.Request.Context(), key, input)
+	revision := h.Service.UpdateDocument(c.Request.Context(), key, shared.Name(value, "文档名称"))
 	c.JSON(http.StatusOK, shared.Row{"success": true, "revision": revision})
 }
 

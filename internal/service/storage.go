@@ -80,7 +80,7 @@ func (s *Service) UploadAttachment(ctx context.Context, upload filestore.Upload)
 	// File I/O must not hold the workspace's global write lock. A failed commit
 	// may leave a shared hash object, which is retained just like deleted attachments.
 	s.Files.SaveAttachment(ctx, upload, hash)
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "attachments", fileKey, func(db *gorm.DB) any {
 		s.FindDocument(db, ctx, fileKey, "write", false)
 		repository.CreateAttachment(db, shared.Row{"file_key": fileKey, "hash": hash, "name": name, "mime": mimeType, "size": upload.Size, "creator_id": user["id"], "privileges": `{"mode":"inherit"}`})
 		return nil
@@ -124,7 +124,7 @@ func (s *Service) AttachmentProgress(ctx context.Context, rawKey, rawHash string
 
 func (s *Service) DeleteAttachment(ctx context.Context, rawKey, rawHash string) {
 	fileKey, hash := shared.Key(rawKey, "文档标识"), attachmentHash(rawHash)
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "attachments", fileKey, func(db *gorm.DB) any {
 		s.findAttachment(db, ctx, fileKey, hash, "write")
 		repository.DeleteAttachment(db, fileKey, hash)
 		// Shared content hashes stay in local storage; deleting a record must not remove them.

@@ -26,9 +26,12 @@ type AIChange struct {
 
 // ApplyAIReview commits the exact reviewed snapshots in a single transaction.
 // Recording the result in that transaction makes retries safe after an unknown network outcome.
-func (s *Service) ApplyAIReview(ctx context.Context, id string) []shared.Row {
+func (s *Service) applyAIReview(ctx context.Context, id string, prepared map[string]collaborationPrepared) []shared.Row {
 	return s.tx(ctx, true, func(db *gorm.DB) any {
 		user := shared.String(identity.User(ctx)["id"])
+		if len(prepared) > 0 && repository.AuthUserForSession(db, user, identity.SessionID(ctx)) == nil {
+			shared.Fail(401, "登录已失效，审阅未应用")
+		}
 		_, snapshot := s.storedAIReview(db, ctx, user, id)
 		changes := snapshot.Changes
 		encoded, err := json.Marshal(changes)
@@ -72,11 +75,35 @@ func (s *Service) ApplyAIReview(ctx context.Context, id string) []shared.Row {
 			}
 			seen[key] = true
 			row := s.FindDocument(db, ctx, key, "write", true)
+			if s.collabSchema {
+				repository.LockCollaborationDocument(db, key)
+			}
 			if shared.Int64(row["revision"]) != change.Revision || shared.String(row["file_name"]) != change.BeforeName || shared.String(row["file_content"]) != change.BeforeContent {
 				shared.Fail(409, "文件已发生变化，请基于最新文档重新生成建议；本次修改未应用")
 			}
-			repository.WorkspaceUpdateDocument(db, key, shared.Row{"file_name": name, "file_content": change.AfterContent}, true, user)
-			results = append(results, shared.Row{"file_key": key, "file_name": name, "revision": change.Revision + 1})
+			content := change.AfterContent
+			result := shared.Row{"file_key": key, "file_name": name, "revision": change.Revision + 1}
+			if s.collabModeColumn && repository.CollaborationMode(db, key) == "collab" {
+				if !s.collabSchema {
+					shared.Fail(503, "协同数据库尚未就绪，禁止覆盖正文")
+				}
+				candidate, ok := prepared[key]
+				if !ok {
+					shared.Fail(409, "协同文档状态已变化，请重新应用审阅")
+				}
+				state := repository.CollaborationMetadata(db, row["id"])
+				if state == nil || state.CollabSeq != candidate.ExpectedCollabSeq || state.Epoch != candidate.Epoch || state.SchemaVersion != candidate.SchemaVersion || candidate.Revision != change.Revision {
+					shared.Fail(409, "协同文档已变化，请重新生成审阅")
+				}
+				bytes := collaborationBytes(CollaborationRequest{SchemaVersion: candidate.SchemaVersion, StateBase64: candidate.StateBase64, Markdown: candidate.Markdown})
+				repository.ReplaceCollaboration(db, row["id"], bytes, state.CollabSeq, state.Epoch)
+				content = candidate.Markdown
+				result["collab_seq"] = state.CollabSeq + 1
+				result["epoch"] = state.Epoch + 1
+				repository.CollaborationEvent(db, "document", key)
+			}
+			repository.WorkspaceUpdateDocument(db, key, shared.Row{"file_name": name, "file_content": content}, true, user)
+			results = append(results, result)
 		}
 		resultJSON, err := json.Marshal(results)
 		shared.Must(err)

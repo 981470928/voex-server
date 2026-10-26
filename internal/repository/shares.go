@@ -24,13 +24,6 @@ func ListSharedAttachments(db *gorm.DB, fileKey string) []shared.Row {
 	return Rows(db.Table("files AS f").Select("f.hash,f.name,f.mime,u.id AS creator_id,u.name AS creator_name").Joins("LEFT JOIN users u ON u.id=f.creator_id").Where("f.file_key=?", fileKey).Order("f.id"))
 }
 
-func UpdateSharedContent(db *gorm.DB, documentID any, content, userID string) {
-	values := documentUpdateActor(userID)
-	values["file_content"] = content
-	values["revision"] = gorm.Expr("revision+1")
-	Must(db.Table("documents").Where("id=?", documentID).Updates(values))
-}
-
 func SharedCreatorAvatar(db *gorm.DB, assetID string, creatorID any) shared.Row {
 	return One(db.Table("assets").Where("id=? AND creator_id=? AND directory='avator' AND mime IN ?", assetID, creatorID, []string{"image/png", "image/jpeg", "image/webp"}))
 }

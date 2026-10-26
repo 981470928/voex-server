@@ -41,6 +41,7 @@ func New(s *service.Service, logger *log.Logger) *Router {
 	h.RegisterRecentRoutes(protected)
 	h.RegisterStorageRoutes(protected)
 	h.RegisterShareRoutes(optional, protected)
+	h.RegisterCollaborationRoutes(optional, engine)
 	// 未匹配的 /api 路由：沿用先登录校验、再返回接口不存在的行为。
 	engine.NoRoute(func(c *gin.Context) {
 		if c.Request.URL.Path == "/api" || strings.HasPrefix(c.Request.URL.Path, "/api/") {

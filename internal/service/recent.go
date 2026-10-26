@@ -112,19 +112,7 @@ func (s *Service) GetRecentFile(ctx context.Context, key string, recordVisit boo
 		if recordVisit {
 			repository.RecordRecentFile(db, shared.String(identity.User(ctx)["id"]), doc)
 		}
-		return limitedDocumentDTO(db, doc, permissions, "")
-	}).(shared.Row)
-}
-
-func (s *Service) UpdateRecentFile(ctx context.Context, key string, input shared.Row) shared.Row {
-	content, version := sharedContentInput(input)
-	return s.tx(ctx, true, func(db *gorm.DB) any {
-		doc, _, _ := s.findRecentFile(db, ctx, key, "write", false)
-		if version != shared.Int64(doc["revision"]) {
-			shared.Fail(409, "文件已被其他人修改，请保留本地内容后重新加载")
-		}
-		repository.UpdateSharedContent(db, doc["id"], content, shared.String(identity.User(ctx)["id"]))
-		return shared.Row{"success": true, "revision": version + 1}
+		return s.addCollaborationMetadata(db, key, limitedDocumentDTO(db, doc, permissions, ""))
 	}).(shared.Row)
 }
 

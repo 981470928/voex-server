@@ -49,6 +49,7 @@ func Load() {
 type Config struct {
 	Address, SecretFile string
 	Database            Database
+	Collaboration       Collaboration
 	Storage             Storage
 }
 type Database struct{ Host, Port, User, Password, Name string }
@@ -63,6 +64,7 @@ func Read() Config {
 			Host: Env("MYSQL_HOST", "127.0.0.1"), Port: Env("MYSQL_PORT", "3306"),
 			User: Env("MYSQL_USER", "root"), Password: Env("MYSQL_PASSWORD", ""), Name: Env("MYSQL_DATABASE", "file_server"),
 		},
-		Storage: Storage{Root: Env("VOEX_STORAGE_ROOT", "/home/static")},
+		Collaboration: ReadCollaboration(),
+		Storage:       Storage{Root: Env("VOEX_STORAGE_ROOT", "/home/static")},
 	}
 }

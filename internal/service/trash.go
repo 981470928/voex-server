@@ -11,7 +11,7 @@ import (
 
 // RestoreFolder 将未到期的文件夹恢复到原项目。
 func (s *Service) RestoreFolder(ctx context.Context, key string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", "", func(db *gorm.DB) any {
 		folder := repository.TrashFolderByKey(db, key)
 		if folder == nil {
 			shared.Fail(404, "文件夹不存在")
@@ -33,7 +33,7 @@ func (s *Service) RestoreFolder(ctx context.Context, key string) {
 
 // RestoreDocument 将未到期的文档恢复到原文件夹。
 func (s *Service) RestoreDocument(ctx context.Context, key string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", key, func(db *gorm.DB) any {
 		document := repository.TrashDocumentByKey(db, key)
 		if document == nil {
 			shared.Fail(404, "文档不存在")
@@ -143,7 +143,7 @@ func (s *Service) ListTrash(
 
 // purgeDocument 彻底删除回收站中的文档
 func (s *Service) PurgeDocument(ctx context.Context, key string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "deleted", key, func(db *gorm.DB) any {
 		document := repository.TrashDocumentByKey(db, key)
 
 		if document == nil {
@@ -161,7 +161,7 @@ func (s *Service) PurgeDocument(ctx context.Context, key string) {
 // PurgeFolder 彻底删除回收站中 的文件夹及其全部文档
 
 func (s *Service) PurgeFolder(ctx context.Context, key string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "deleted", "", func(db *gorm.DB) any {
 		folder := repository.TrashFolderByKey(db, key)
 		if folder == nil {
 			shared.Fail(404, "文件夹不存在")
@@ -186,7 +186,7 @@ func (s *Service) requireTrashAction(db *gorm.DB, ctx context.Context, row share
 	}
 }
 func (s *Service) BulkTrash(ctx context.Context, teamKey, projectKey string, restore bool) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "deleted", "", func(db *gorm.DB) any {
 		team := s.SelectedTeam(db, ctx, teamKey)
 		s.teamRow(db, ctx, shared.String(team["team_key"]), true)
 		ids := []int64{}

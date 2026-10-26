@@ -5,10 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
-	"math"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
@@ -28,11 +25,14 @@ func (s *Service) shareToken(key, mode string) string {
 	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 func (s *Service) sharedDocument(db *gorm.DB, ctx context.Context, token string) (shared.Row, shared.Row) {
+	return s.sharedDocumentContent(db, ctx, token, true)
+}
+func (s *Service) sharedDocumentContent(db *gorm.DB, ctx context.Context, token string, content bool) (shared.Row, shared.Row) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 4 || parts[0] != "v1" || (parts[2] != "read" && parts[2] != "edit") || !hmac.Equal([]byte(token), []byte(s.shareToken(parts[1], parts[2]))) {
 		shared.Fail(404, "分享链接无效")
 	}
-	doc := repository.DocumentByKey(db, parts[1], true)
+	doc := repository.DocumentByKey(db, parts[1], content)
 	if doc == nil {
 		shared.Fail(404, "文件不存在")
 	}
@@ -48,26 +48,6 @@ func (s *Service) sharedDocument(db *gorm.DB, ctx context.Context, token string)
 	doc["share_permission"] = parts[2]
 	doc["share_enabled"] = enabled
 	return doc, shared.Row{"read": true, "write": shared.Bool(access["write"]) || (enabled && parts[2] == "edit"), "manage": false, "share": false}
-}
-
-func shareRevision(value any) (int64, bool) {
-	var number float64
-	switch value := value.(type) {
-	case float64:
-		number = value
-	case json.Number:
-		parsed, err := strconv.ParseFloat(string(value), 64)
-		if err != nil {
-			return 0, false
-		}
-		number = parsed
-	default:
-		return 0, false
-	}
-	if math.IsNaN(number) || math.IsInf(number, 0) || number < 1 || number >= 9223372036854775808 || math.Trunc(number) != number {
-		return 0, false
-	}
-	return int64(number), true
 }
 
 func (s *Service) DocumentSharing(ctx context.Context, key string) shared.Row {
@@ -104,14 +84,14 @@ func (s *Service) SetDocumentSharing(ctx context.Context, key string, input shar
 	if !ok || (mode != "read" && mode != "edit") || len(input) != 2 {
 		shared.Fail(400, "请选择分享类型与开关状态")
 	}
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", key, func(db *gorm.DB) any {
 		doc := s.FindDocument(db, ctx, key, "manage", false)
 		repository.SetDocumentSharing(db, doc["id"], mode, enabled)
 		return nil
 	})
 }
 func (s *Service) RevokeDocumentAccess(ctx context.Context, key, userID string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "permissions", key, func(db *gorm.DB) any {
 		doc := s.FindDocument(db, ctx, key, "manage", false)
 		target := identity.WithUser(ctx, shared.Row{"id": userID}, "")
 		project := s.ProjectPermissions(db, target, shared.String(doc["project_key"]))
@@ -151,17 +131,8 @@ func (s *Service) GetSharedDocument(ctx context.Context, token string, recordVis
 		if shared.String(doc["creator_avator"]) != "" {
 			avator = "/api/shared-file/creator-avator"
 		}
-		return limitedDocumentDTO(db, doc, permissions, avator)
+		return s.addCollaborationMetadata(db, shared.String(doc["file_key"]), limitedDocumentDTO(db, doc, permissions, avator))
 	}).(shared.Row)
-}
-
-func sharedContentInput(input shared.Row) (string, int64) {
-	content, contentOK := input["file_content"].(string)
-	version, versionOK := shareRevision(input["revision"])
-	if !contentOK || !versionOK || len(input) != 2 {
-		shared.Fail(400, "分享编辑仅允许提交正文和版本号")
-	}
-	return content, version
 }
 
 func (s *Service) SharedAttachment(ctx context.Context, token, hash string) filestore.Download {

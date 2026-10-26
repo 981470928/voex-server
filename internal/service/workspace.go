@@ -135,7 +135,7 @@ func (s *Service) RenameProject(ctx context.Context, key, name string) {
 }
 
 func (s *Service) DeleteProject(ctx context.Context, key string, cascade bool) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "deleted", "", func(db *gorm.DB) any {
 		project := workspaceFindProject(db, key)
 		s.RequireProject(db, ctx, key, "remove")
 		if !cascade && repository.WorkspaceProjectHasFolders(db, project["id"]) {
@@ -198,7 +198,7 @@ func (s *Service) RenameFolder(ctx context.Context, key, name string) {
 }
 
 func (s *Service) DeleteFolder(ctx context.Context, key string, cascade bool) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "deleted", "", func(db *gorm.DB) any {
 		folder := workspaceFindFolder(db, key)
 		project := workspaceFolderProject(db, folder)
 
@@ -232,7 +232,7 @@ func (s *Service) ProjectPrivileges(ctx context.Context, key string) shared.Row 
 }
 
 func (s *Service) SetProjectPrivileges(ctx context.Context, key string, modeValue, idsValue any) shared.Row {
-	return s.tx(ctx, true, func(db *gorm.DB) any {
+	return s.txEvent(ctx, "permissions", "", func(db *gorm.DB) any {
 		project := workspaceFindProject(db, key)
 		s.RequireProject(db, ctx, key, "manage")
 		mode, isString := modeValue.(string)
@@ -352,7 +352,7 @@ func (s *Service) CreateDocument(ctx context.Context, input CreateDocumentInput)
 func (s *Service) GetDocument(ctx context.Context, key string, recordVisit bool) shared.Row {
 	return s.tx(ctx, recordVisit, func(db *gorm.DB) any {
 		row := s.FindDocument(db, ctx, key, "read", true)
-		result := DocumentDTO(row)
+		result := s.addCollaborationMetadata(db, key, DocumentDTO(row))
 		result["file_content"] = row["file_content"]
 		result["permissions"] = row["permissions"]
 		if recordVisit {
@@ -360,12 +360,6 @@ func (s *Service) GetDocument(ctx context.Context, key string, recordVisit bool)
 		}
 		return result
 	}).(shared.Row)
-}
-
-type UpdateDocumentInput struct {
-	Changes    shared.Row
-	HasContent bool
-	Revision   any
 }
 
 // workspaceRevision follows JavaScript Number.isInteger, including large finite integers.
@@ -389,27 +383,17 @@ func workspaceRevision(value any) (float64, bool) {
 	return number, true
 }
 
-func (s *Service) UpdateDocument(ctx context.Context, key string, input UpdateDocumentInput) int64 {
-	return s.tx(ctx, true, func(db *gorm.DB) any {
+// UpdateDocument 只更新名称；正文持久化由协同服务和 AI 审阅事务负责。
+func (s *Service) UpdateDocument(ctx context.Context, key, name string) int64 {
+	return s.txEvent(ctx, "metadata", key, func(db *gorm.DB) any {
 		document := s.FindDocument(db, ctx, key, "write", false)
-		next := shared.Int64(document["revision"])
-		if input.HasContent {
-			requested, valid := workspaceRevision(input.Revision)
-			if !valid {
-				shared.Fail(400, "保存正文需要版本号")
-			}
-			if requested != float64(next) {
-				shared.Fail(409, "文件已被其他人修改，请保留本地内容后重新加载")
-			}
-			next++
-		}
-		repository.WorkspaceUpdateDocument(db, shared.String(document["file_key"]), input.Changes, input.HasContent, shared.String(identity.User(ctx)["id"]))
-		return next
+		repository.WorkspaceUpdateDocument(db, shared.String(document["file_key"]), shared.Row{"file_name": name}, false, shared.String(identity.User(ctx)["id"]))
+		return shared.Int64(document["revision"])
 	}).(int64)
 }
 
 func (s *Service) DeleteDocument(ctx context.Context, key string) {
-	s.tx(ctx, true, func(db *gorm.DB) any {
+	s.txEvent(ctx, "deleted", key, func(db *gorm.DB) any {
 		document := s.FindDocument(db, ctx, key, "remove", false)
 		userID := shared.String(identity.User(ctx)["id"])
 
